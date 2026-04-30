@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
@@ -95,6 +96,11 @@ type RequestDetail struct {
 	AuthIndex string     `json:"auth_index"`
 	Tokens    TokenStats `json:"tokens"`
 	Failed    bool       `json:"failed"`
+	// RequestID correlates this row with the on-disk request log file
+	// (request_logger.go writes filenames as `*-{requestID}.log`).
+	// Resolved from ctx in Record(); empty when neither ctx nor the Gin
+	// context carry one (e.g. internal background callers).
+	RequestID string `json:"request_id,omitempty"`
 }
 
 // TokenStats captures the token usage breakdown for a request.
@@ -178,6 +184,12 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	if modelName == "" {
 		modelName = "unknown"
 	}
+	requestID := strings.TrimSpace(internallogging.GetRequestID(ctx))
+	if requestID == "" {
+		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
+			requestID = strings.TrimSpace(internallogging.GetGinRequestID(ginCtx))
+		}
+	}
 	dayKey := timestamp.Format("2006-01-02")
 	hourKey := timestamp.Hour()
 
@@ -204,6 +216,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		AuthIndex: record.AuthIndex,
 		Tokens:    detail,
 		Failed:    failed,
+		RequestID: requestID,
 	})
 
 	s.requestsByDay[dayKey]++
@@ -384,12 +397,13 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 	timestamp := detail.Timestamp.UTC().Format(time.RFC3339Nano)
 	tokens := normaliseTokenStats(detail.Tokens)
 	return fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
+		"%s|%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
 		apiName,
 		modelName,
 		timestamp,
 		detail.Source,
 		detail.AuthIndex,
+		detail.RequestID,
 		detail.Failed,
 		tokens.InputTokens,
 		tokens.OutputTokens,
