@@ -20,7 +20,11 @@ import (
 )
 
 const (
-	latestReleaseURL       = "https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest"
+	// latestReleaseURL is the GitHub releases endpoint that backs the
+	// management UI's "check for update" affordance. The fork retargets it
+	// at its own release stream so the UI doesn't compare zmh-v0.1.0 against
+	// upstream's v6.x and tell users to "update to upstream".
+	latestReleaseURL       = "https://api.github.com/repos/Z-M-Huang/CLIProxyAPI/releases/latest"
 	latestReleaseUserAgent = "CLIProxyAPI"
 )
 
