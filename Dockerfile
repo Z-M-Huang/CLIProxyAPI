@@ -24,6 +24,14 @@ COPY --from=builder ./app/CLIProxyAPI /CLIProxyAPI/CLIProxyAPI
 
 COPY config.example.yaml /CLIProxyAPI/config.example.yaml
 
+# Bake the management UI bundle so a freshly-pulled image serves the right
+# UI on first request, before the auto-updater's first 3-hour tick. The build
+# context is expected to carry a fresh static/management.html (see the
+# README's release flow).
+COPY static/management.html /CLIProxyAPI/static/management.html
+
+ENV MANAGEMENT_STATIC_PATH=/CLIProxyAPI/static
+
 WORKDIR /CLIProxyAPI
 
 EXPOSE 8317

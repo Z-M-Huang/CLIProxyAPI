@@ -25,13 +25,20 @@ import (
 )
 
 const (
-	defaultManagementReleaseURL  = "https://api.github.com/repos/router-for-me/Cli-Proxy-API-Management-Center/releases/latest"
-	defaultManagementFallbackURL = "https://cpamc.router-for.me/"
-	managementAssetName          = "management.html"
-	httpUserAgent                = "CLIProxyAPI-management-updater"
-	managementSyncMinInterval    = 30 * time.Second
-	updateCheckInterval          = 3 * time.Hour
-	maxAssetDownloadSize         = 50 << 20 // 10 MB safety limit for management asset downloads
+	// defaultManagementReleaseURL points at the fork's frontend release feed.
+	// The auto-updater pulls management.html from "latest" here every
+	// updateCheckInterval. The fork-controlled fallback URL upstream used
+	// (https://cpamc.router-for.me/) is intentionally absent — if the GitHub
+	// release fetch fails the updater leaves whatever local asset already
+	// exists in place; if no local asset exists, /management.html returns 404
+	// until the next successful fetch. The Dockerfile bakes the bundle so
+	// fresh containers always have a usable local asset.
+	defaultManagementReleaseURL = "https://api.github.com/repos/Z-M-Huang/Cli-Proxy-API-Management-Center/releases/latest"
+	managementAssetName         = "management.html"
+	httpUserAgent               = "CLIProxyAPI-management-updater"
+	managementSyncMinInterval   = 30 * time.Second
+	updateCheckInterval         = 3 * time.Hour
+	maxAssetDownloadSize        = 50 << 20 // 10 MB safety limit for management asset downloads
 )
 
 // ManagementFileName exposes the control panel asset filename.
@@ -234,11 +241,11 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 
 		asset, remoteHash, err := fetchLatestAsset(ctx, client, releaseURL)
 		if err != nil {
+			// No fork-operated fallback URL — if the GitHub fetch fails we
+			// leave any existing local asset in place. localFileMissing here
+			// means /management.html will 404 until the next tick succeeds.
 			if localFileMissing {
-				log.WithError(err).Warn("failed to fetch latest management release information, trying fallback page")
-				if ensureFallbackManagementHTML(ctx, client, localPath) {
-					return nil, nil
-				}
+				log.WithError(err).Warn("failed to fetch latest management release information; no local asset to serve")
 				return nil, nil
 			}
 			log.WithError(err).Warn("failed to fetch latest management release information")
@@ -252,13 +259,6 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 
 		data, downloadedHash, err := downloadAsset(ctx, client, asset.BrowserDownloadURL)
 		if err != nil {
-			if localFileMissing {
-				log.WithError(err).Warn("failed to download management asset, trying fallback page")
-				if ensureFallbackManagementHTML(ctx, client, localPath) {
-					return nil, nil
-				}
-				return nil, nil
-			}
 			log.WithError(err).Warn("failed to download management asset")
 			return nil, nil
 		}
@@ -279,25 +279,6 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 
 	_, err := os.Stat(localPath)
 	return err == nil
-}
-
-func ensureFallbackManagementHTML(ctx context.Context, client *http.Client, localPath string) bool {
-	data, downloadedHash, err := downloadAsset(ctx, client, defaultManagementFallbackURL)
-	if err != nil {
-		log.WithError(err).Warn("failed to download fallback management control panel page")
-		return false
-	}
-
-	log.Warnf("management asset downloaded from fallback URL without digest verification (hash=%s) — "+
-		"enable verified GitHub updates by keeping disable-auto-update-panel set to false", downloadedHash)
-
-	if err = atomicWriteFile(localPath, data); err != nil {
-		log.WithError(err).Warn("failed to persist fallback management control panel page")
-		return false
-	}
-
-	log.Infof("management asset updated from fallback page successfully (hash=%s)", downloadedHash)
-	return true
 }
 
 func resolveReleaseURL(repo string) string {

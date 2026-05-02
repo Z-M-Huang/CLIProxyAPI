@@ -2,6 +2,8 @@
 
 English | [中文](README_CN.md) | [日本語](README_JA.md)
 
+> **Fork notice.** This is [Z-M-Huang's](https://github.com/Z-M-Huang) fork of [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). It carries extra features (currently: **Prompt Rules** — content-level inject/strip on outgoing requests) and republishes the docker image at `zhironghuang/cli-proxy-api`. Upstream improvements are merged in periodically. For the original project, follow the upstream link.
+
 A proxy server that provides OpenAI/Gemini/Claude/Codex compatible API interfaces for CLI.
 
 It now also supports OpenAI Codex (GPT models) and Claude Code via OAuth.
