@@ -238,4 +238,3 @@ func openaiStripMessageContent(payload []byte, idx int, re *regexp.Regexp) []byt
 	}
 	return payload
 }
-
