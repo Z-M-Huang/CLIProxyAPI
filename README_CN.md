@@ -2,6 +2,8 @@
 
 [English](README.md) | 中文 | [日本語](README_JA.md)
 
+> **分叉说明。** 本仓库是 [Z-M-Huang](https://github.com/Z-M-Huang) 维护的 [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 分叉，附带额外功能（当前：**提示规则** — 出站请求的内容级注入/剥离；恢复版日志支持计划在 v0.2.0 上线），并以 `zhironghuang/cli-proxy-api` 重新发布 Docker 镜像。会定期合并上游改进。原始项目请访问上方链接。
+
 一个为 CLI 提供 OpenAI/Gemini/Claude/Codex 兼容 API 接口的代理服务器。
 
 现已支持通过 OAuth 登录接入 OpenAI Codex（GPT 系列）和 Claude Code。
