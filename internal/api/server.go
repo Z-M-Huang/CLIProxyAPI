@@ -552,6 +552,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
 		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyUsage)
 
+		mgmt.GET("/prompt-rules", s.mgmt.GetPromptRules)
+		mgmt.PUT("/prompt-rules", s.mgmt.PutPromptRules)
+		mgmt.PATCH("/prompt-rules", s.mgmt.PatchPromptRule)
+		mgmt.DELETE("/prompt-rules", s.mgmt.DeletePromptRule)
+
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
 		mgmt.PATCH("/gemini-api-key", s.mgmt.PatchGeminiKey)

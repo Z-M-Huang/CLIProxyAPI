@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
@@ -119,6 +120,13 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_yaml", "message": err.Error()})
 		return
 	}
+	// Strict prompt-rules validation BEFORE the temp-file LoadConfigOptional dance.
+	// SanitizePromptRules (called inside LoadConfigOptional) silently drops invalid
+	// rules — we want the API caller to receive a 400 with a reason instead.
+	if err = cfg.ValidatePromptRules(); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_prompt_rules", "message": err.Error()})
+		return
+	}
 	// Validate config using LoadConfigOptional with optional=false to enforce parsing
 	tmpDir := filepath.Dir(h.configFilePath)
 	tmpFile, err := os.CreateTemp(tmpDir, "config-validate-*.yaml")
@@ -141,24 +149,44 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 	defer func() {
 		_ = os.Remove(tempFile)
 	}()
-	_, err = config.LoadConfigOptional(tempFile, false)
-	if err != nil {
+	// LoadConfigOptional below side-effects the global prompt-rules snapshot
+	// via SanitizePromptRules. If any later step (WriteConfig / LoadConfig)
+	// fails we must restore the previous snapshot, otherwise live requests
+	// would be rewritten by rules that were never persisted to disk. Hold
+	// h.mu across the entire validate -> write -> reload sequence so the
+	// captured snapshot baseline can't drift under us.
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	prevPromptRules := append([]config.PromptRule(nil), h.cfg.PromptRules...)
+	rollbackPromptRules := func() {
+		helps.UpdatePromptRulesSnapshot(prevPromptRules)
+	}
+	if _, err = config.LoadConfigOptional(tempFile, false); err != nil {
+		rollbackPromptRules()
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": err.Error()})
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	if WriteConfig(h.configFilePath, body) != nil {
+		rollbackPromptRules()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": "failed to write config"})
 		return
 	}
 	// Reload into handler to keep memory in sync
 	newCfg, err := config.LoadConfig(h.configFilePath)
 	if err != nil {
+		// Disk now holds the new YAML, but we couldn't reload it. Roll the
+		// snapshot back to match h.cfg (still the old in-memory rules) so the
+		// runtime is at least self-consistent until the operator investigates.
+		rollbackPromptRules()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "reload_failed", "message": err.Error()})
 		return
 	}
 	h.cfg = newCfg
+	// Defensive: explicitly republish the prompt-rules snapshot from the
+	// committed config so any premature update from the temp-file validation
+	// load is overridden. LoadConfig's Sanitize already calls the hook, but
+	// belt-and-suspenders here protects against future refactors.
+	helps.UpdatePromptRulesSnapshot(h.cfg.PromptRules)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "changed": []string{"config"}})
 }
 
