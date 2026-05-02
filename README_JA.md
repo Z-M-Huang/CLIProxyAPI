@@ -2,7 +2,7 @@
 
 [English](README.md) | [中文](README_CN.md) | 日本語
 
-> **フォークについて。** 本リポジトリは [Z-M-Huang](https://github.com/Z-M-Huang) による [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) のフォークで、追加機能（現在は **Prompt Rules** — 送信リクエストへのコンテンツレベルの注入／除去）を含み、Docker イメージは `zhironghuang/cli-proxy-api` で再公開しています。上流の改善は定期的にマージしています。元のプロジェクトは上記リンクをご参照ください。
+> **フォークについて。** 本リポジトリは [Z-M-Huang](https://github.com/Z-M-Huang) による [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) のフォークで、追加機能（現在は **Prompt Rules** — 送信リクエストへのコンテンツレベルの注入／除去。再構築されたロギングサポートは v0.2.0 で予定）を含み、Docker イメージは `zhironghuang/cli-proxy-api` で再公開しています。上流の改善は定期的にマージしています。元のプロジェクトは上記リンクをご参照ください。
 
 CLI向けのOpenAI/Gemini/Claude/Codex互換APIインターフェースを提供するプロキシサーバーです。
 

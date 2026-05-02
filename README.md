@@ -2,7 +2,7 @@
 
 English | [中文](README_CN.md) | [日本語](README_JA.md)
 
-> **Fork notice.** This is [Z-M-Huang's](https://github.com/Z-M-Huang) fork of [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). It carries extra features (currently: **Prompt Rules** — content-level inject/strip on outgoing requests) and republishes the docker image at `zhironghuang/cli-proxy-api`. Upstream improvements are merged in periodically. For the original project, follow the upstream link.
+> **Fork notice.** This is [Z-M-Huang's](https://github.com/Z-M-Huang) fork of [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). It carries extra features (currently: **Prompt Rules** — content-level inject/strip on outgoing requests; revived logging support is planned for v0.2.0) and republishes the docker image at `zhironghuang/cli-proxy-api`. Upstream improvements are merged in periodically. For the original project, follow the upstream link.
 
 A proxy server that provides OpenAI/Gemini/Claude/Codex compatible API interfaces for CLI.
 
