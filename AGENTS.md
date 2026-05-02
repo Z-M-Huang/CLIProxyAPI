@@ -2,8 +2,19 @@
 
 Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with OAuth and round-robin load balancing.
 
+## Fork notice — read first
+
+This is the [Z-M-Huang/CLIProxyAPI](https://github.com/Z-M-Huang/CLIProxyAPI) soft fork of upstream. **Before opening any branch or PR, read [`CONTRIBUTING.md`](./CONTRIBUTING.md)** for the fork-specific workflow. Quick rules for AI assistants:
+
+- Cut new branches from `dev`, never `main`. PR into `dev`.
+- Don't open PRs against `router-for-me/*` — upstream merge is no longer the goal.
+- Release tags are `zmh-vX.Y.Z`, never bare `vX.Y.Z` (upstream owns that namespace).
+- Backend Docker image is pushed manually from local; no GHA workflows are kept on this fork.
+- Customization surface (where upstream-sync conflicts are expected) is enumerated in CONTRIBUTING.md — keep our version in those files; take upstream everywhere else.
+
 ## Repository
-- GitHub: https://github.com/router-for-me/CLIProxyAPI
+- Fork (this repo): https://github.com/Z-M-Huang/CLIProxyAPI
+- Upstream: https://github.com/router-for-me/CLIProxyAPI
 
 ## Commands
 ```bash
