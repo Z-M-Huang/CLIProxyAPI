@@ -184,12 +184,11 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		modelName = "unknown"
 	}
 	// Record runs in the usage manager's worker goroutine after the request
-	// handler has returned (sdk/cliproxy/usage/manager.go), so the *gin.Context
-	// embedded in ctx may have been recycled by Gin's pool. Reading from the
-	// standard context is the only safe option here. The synchronous lift that
-	// promotes any Gin-stored request ID onto the standard context lives in
-	// helps.UsageReporter.ensureRequestIDOnContext, which runs while the
-	// request handler is still active.
+	// handler has returned (sdk/cliproxy/usage/manager.go). Callers in
+	// helps.UsageReporter detach the published context from short-lived
+	// Gin pool values via detachUsageContext (synchronous, while the request
+	// handler is still active), so reading request_id from the standard
+	// context here is the safe option.
 	var requestID string
 	if ctx != nil {
 		requestID = strings.TrimSpace(internallogging.GetRequestID(ctx))
