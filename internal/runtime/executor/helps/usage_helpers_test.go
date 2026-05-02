@@ -1,9 +1,13 @@
 package helps
 
 import (
+	"context"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
@@ -122,5 +126,57 @@ func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 	}
 	if _, ok := reporter.buildAdditionalModelRecord("gpt-image-2", usage.Detail{CachedTokens: 2}); !ok {
 		t.Fatalf("expected non-zero cached token usage to be recorded")
+	}
+}
+
+func TestDetachUsageContext_NilCtxReturnsBackground(t *testing.T) {
+	out := detachUsageContext(nil)
+	if out == nil {
+		t.Fatalf("detachUsageContext(nil) returned nil; want non-nil background-rooted ctx")
+	}
+	if internallogging.GetRequestID(out) != "" {
+		t.Fatalf("nil input must not carry a request id, got %q", internallogging.GetRequestID(out))
+	}
+}
+
+func TestDetachUsageContext_DropsGinAndHandler(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	internallogging.SetGinRequestID(c, "req-from-gin")
+	parent := context.Background()
+	parent = context.WithValue(parent, "gin", c)        //nolint:staticcheck // matches sdk/api/handlers/handlers.go
+	parent = context.WithValue(parent, "handler", "x")  //nolint:staticcheck // matches sdk/api/handlers/handlers.go
+
+	out := detachUsageContext(parent)
+
+	if got := out.Value("gin"); got != nil { //nolint:staticcheck
+		t.Fatalf("detached ctx still carries \"gin\" value: %T", got)
+	}
+	if got := out.Value("handler"); got != nil { //nolint:staticcheck
+		t.Fatalf("detached ctx still carries \"handler\" value: %T", got)
+	}
+	if id := internallogging.GetRequestID(out); id != "req-from-gin" {
+		t.Fatalf("request id from gin not lifted onto detached ctx; got %q want %q", id, "req-from-gin")
+	}
+}
+
+func TestDetachUsageContext_PreservesEndpointAndStatusHolder(t *testing.T) {
+	parent := context.Background()
+	parent = internallogging.WithEndpoint(parent, "/v1/chat/completions")
+	parent = internallogging.WithResponseStatusHolder(parent)
+	parent = internallogging.WithRequestID(parent, "abc12345")
+
+	out := detachUsageContext(parent)
+
+	if got := internallogging.GetEndpoint(out); got != "/v1/chat/completions" {
+		t.Fatalf("endpoint not preserved on detached ctx; got %q", got)
+	}
+	if id := internallogging.GetRequestID(out); id != "abc12345" {
+		t.Fatalf("request id not preserved on detached ctx; got %q", id)
+	}
+	// Mutate via parent, observe via detached: holder must be shared by pointer.
+	internallogging.SetResponseStatus(parent, 503)
+	if got := internallogging.GetResponseStatus(out); got != 503 {
+		t.Fatalf("response status holder not shared; detached ctx sees %d, want 503", got)
 	}
 }

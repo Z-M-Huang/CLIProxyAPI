@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
@@ -44,6 +45,35 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 	return reporter
 }
 
+// detachUsageContext returns a context.Background()-rooted context carrying
+// only the request metadata that is safe to retain across Gin's pool
+// recycling: request_id, endpoint, and the (mutable, shared-by-pointer)
+// response-status holder. It deliberately drops the "gin" / "handler" /
+// request-path values that sdk/api/handlers/handlers.go attaches to the
+// request context, so the usage manager's async worker never holds a
+// *gin.Context past the request lifecycle.
+//
+// The synchronous lift here also resolves a Gin-stored request id onto the
+// standard context while a live *gin.Context is still in scope; downstream
+// plugins read request_id from the standard context only.
+func detachUsageContext(ctx context.Context) context.Context {
+	out := context.Background()
+	if ctx == nil {
+		return out
+	}
+	out = internallogging.CopyMetadata(ctx, out)
+	requestID := strings.TrimSpace(internallogging.GetRequestID(ctx))
+	if requestID == "" {
+		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
+			requestID = strings.TrimSpace(internallogging.GetGinRequestID(ginCtx))
+		}
+	}
+	if requestID != "" {
+		out = internallogging.WithRequestID(out, requestID)
+	}
+	return out
+}
+
 func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
 	r.publishWithOutcome(ctx, detail, false)
 }
@@ -53,7 +83,7 @@ func (r *UsageReporter) PublishAdditionalModel(ctx context.Context, model string
 	if !ok {
 		return
 	}
-	usage.PublishRecord(ctx, record)
+	usage.PublishRecord(detachUsageContext(ctx), record)
 }
 
 func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.Detail) (usage.Record, bool) {
@@ -89,8 +119,9 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 		return
 	}
 	detail = normalizeUsageDetailTotal(detail)
+	publishCtx := detachUsageContext(ctx)
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(detail, failed))
+		usage.PublishRecord(publishCtx, r.buildRecord(detail, failed))
 	})
 }
 
@@ -120,8 +151,9 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 	if r == nil {
 		return
 	}
+	publishCtx := detachUsageContext(ctx)
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(usage.Detail{}, false))
+		usage.PublishRecord(publishCtx, r.buildRecord(usage.Detail{}, false))
 	})
 }
 
