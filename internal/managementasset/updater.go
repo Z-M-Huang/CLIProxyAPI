@@ -31,8 +31,10 @@ const (
 	// (https://cpamc.router-for.me/) is intentionally absent — if the GitHub
 	// release fetch fails the updater leaves whatever local asset already
 	// exists in place; if no local asset exists, /management.html returns 404
-	// until the next successful fetch. The Dockerfile bakes the bundle so
-	// fresh containers always have a usable local asset.
+	// until the next successful fetch. The server.go safety net at
+	// serveManagementControlPanel re-runs the fetch synchronously on first
+	// /management.html request when the local asset is missing, so a fresh
+	// container without a baked bundle still recovers on first hit.
 	defaultManagementReleaseURL = "https://api.github.com/repos/Z-M-Huang/Cli-Proxy-API-Management-Center/releases/latest"
 	managementAssetName         = "management.html"
 	httpUserAgent               = "CLIProxyAPI-management-updater"
