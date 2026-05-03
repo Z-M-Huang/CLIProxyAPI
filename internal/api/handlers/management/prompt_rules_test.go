@@ -176,11 +176,11 @@ func TestPromptRules_API_PatchByName(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PATCH expected 200; got %d body=%s", rec.Code, rec.Body.String())
 	}
-	if h.cfg.PromptRules[0].Position != "prepend" {
-		t.Fatalf("expected position updated to prepend; got %+v", h.cfg.PromptRules[0])
+	if h.cfg().PromptRules[0].Position != "prepend" {
+		t.Fatalf("expected position updated to prepend; got %+v", h.cfg().PromptRules[0])
 	}
-	if h.cfg.PromptRules[0].Content != "<!-- pr:r1 --> NEW" {
-		t.Fatalf("expected content updated; got %q", h.cfg.PromptRules[0].Content)
+	if h.cfg().PromptRules[0].Content != "<!-- pr:r1 --> NEW" {
+		t.Fatalf("expected content updated; got %q", h.cfg().PromptRules[0].Content)
 	}
 }
 
@@ -200,8 +200,8 @@ func TestPromptRules_API_DeleteByName(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("DELETE expected 200; got %d body=%s", rec.Code, rec.Body.String())
 	}
-	if len(h.cfg.PromptRules) != 1 || h.cfg.PromptRules[0].Name != "b" {
-		t.Fatalf("expected only 'b' to remain; got %+v", h.cfg.PromptRules)
+	if len(h.cfg().PromptRules) != 1 || h.cfg().PromptRules[0].Name != "b" {
+		t.Fatalf("expected only 'b' to remain; got %+v", h.cfg().PromptRules)
 	}
 }
 
@@ -233,8 +233,8 @@ func TestPromptRules_API_PutEmptyBodyClears(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 for empty body (clears); got %d body=%s", rec.Code, rec.Body.String())
 	}
-	if len(h.cfg.PromptRules) != 0 {
-		t.Fatalf("expected list cleared; got %+v", h.cfg.PromptRules)
+	if len(h.cfg().PromptRules) != 0 {
+		t.Fatalf("expected list cleared; got %+v", h.cfg().PromptRules)
 	}
 }
 
@@ -286,8 +286,8 @@ func TestPromptRules_API_Put_RollbackOnPersistFailure(t *testing.T) {
 		t.Fatalf("expected 500 from persist failure; got %d body=%s", rec.Code, rec.Body.String())
 	}
 
-	if got := h.cfg.PromptRules; len(got) != 1 || got[0].Name != "before" {
-		t.Fatalf("h.cfg.PromptRules must be rolled back; got %+v", got)
+	if got := h.cfg().PromptRules; len(got) != 1 || got[0].Name != "before" {
+		t.Fatalf("h.cfg().PromptRules must be rolled back; got %+v", got)
 	}
 
 	out := helps.ApplyPromptRules(

@@ -13,9 +13,10 @@ import (
 
 // GetPromptRules returns the current configured prompt rules.
 func (h *Handler) GetPromptRules(c *gin.Context) {
-	h.mu.Lock()
-	out := append([]config.PromptRule(nil), h.cfg.PromptRules...)
-	h.mu.Unlock()
+	out := make([]config.PromptRule, 0)
+	if cfg := h.cfg(); cfg != nil {
+		out = append(out, cfg.PromptRules...)
+	}
 	if out == nil {
 		out = []config.PromptRule{}
 	}
@@ -38,6 +39,10 @@ func (h *Handler) PutPromptRules(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	cur := make([]config.PromptRule, 0)
+	if cfg := h.cfg(); cfg != nil {
+		cur = append(cur, cfg.PromptRules...)
+	}
 	h.applyPromptRulesAndPersist(c, candidate.PromptRules)
 }
 
@@ -59,7 +64,10 @@ func (h *Handler) PatchPromptRule(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	cur := append([]config.PromptRule(nil), h.cfg.PromptRules...)
+	cur := make([]config.PromptRule, 0)
+	if cfg := h.cfg(); cfg != nil {
+		cur = append(cur, cfg.PromptRules...)
+	}
 	targetIdx := -1
 	if body.Index != nil && *body.Index >= 0 && *body.Index < len(cur) {
 		targetIdx = *body.Index
@@ -92,10 +100,15 @@ func (h *Handler) PatchPromptRule(c *gin.Context) {
 func (h *Handler) DeletePromptRule(c *gin.Context) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	curCfg := h.cfg()
+	curRules := make([]config.PromptRule, 0)
+	if curCfg != nil {
+		curRules = append(curRules, curCfg.PromptRules...)
+	}
 	if name := strings.TrimSpace(c.Query("name")); name != "" {
-		out := make([]config.PromptRule, 0, len(h.cfg.PromptRules))
+		out := make([]config.PromptRule, 0, len(curRules))
 		removed := false
-		for _, r := range h.cfg.PromptRules {
+		for _, r := range curRules {
 			if r.Name == name {
 				removed = true
 				continue
@@ -114,9 +127,9 @@ func (h *Handler) DeletePromptRule(c *gin.Context) {
 		// fmt.Sscanf silently accepts as 123 — important here because we
 		// use the parsed index to splice the slice without further bounds
 		// checking on the raw string.
-		if idx, err := strconv.Atoi(idxStr); err == nil && idx >= 0 && idx < len(h.cfg.PromptRules) {
-			next := append([]config.PromptRule(nil), h.cfg.PromptRules[:idx]...)
-			next = append(next, h.cfg.PromptRules[idx+1:]...)
+		if idx, err := strconv.Atoi(idxStr); err == nil && idx >= 0 && idx < len(curRules) {
+			next := append([]config.PromptRule(nil), curRules[:idx]...)
+			next = append(next, curRules[idx+1:]...)
 			h.applyPromptRulesAndPersist(c, next)
 			return
 		}
@@ -124,22 +137,38 @@ func (h *Handler) DeletePromptRule(c *gin.Context) {
 	c.JSON(http.StatusBadRequest, gin.H{"error": "missing name or index"})
 }
 
-// applyPromptRulesAndPersist installs `next` into h.cfg.PromptRules, refreshes
-// the runtime snapshot, then asks persistLocked to write config.yaml. If the
-// disk write fails, both the in-memory rules and the runtime snapshot are
-// rolled back to their pre-call state — otherwise the API returning 500 would
-// leave the runtime rewriting requests with rules that were never saved
-// (Codex review pull/3178#pullrequestreview-4210925408).
+// applyPromptRulesAndPersist publishes a cloned config snapshot with the new
+// prompt-rules list, updates the in-process regex snapshot, and persists the
+// cloned config to disk. On persist failure, the runtime snapshot is rolled
+// back to the previously-loaded rule list.
 //
-// Caller MUST already hold h.mu. persistLocked writes the response body.
+// Caller MUST already hold h.mu.
 func (h *Handler) applyPromptRulesAndPersist(c *gin.Context, next []config.PromptRule) {
-	prev := append([]config.PromptRule(nil), h.cfg.PromptRules...)
-	h.cfg.PromptRules = next
-	helps.UpdatePromptRulesSnapshot(h.cfg.PromptRules)
-	if !h.persistLocked(c) {
-		h.cfg.PromptRules = prev
-		helps.UpdatePromptRulesSnapshot(prev)
+	cur := h.cfg()
+	prev := make([]config.PromptRule, 0)
+	if cur != nil {
+		prev = append(prev, cur.PromptRules...)
 	}
+
+	clone, err := cloneConfigSnapshot(cur)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to clone config"})
+		return
+	}
+	clone.PromptRules = append([]config.PromptRule(nil), next...)
+	helps.UpdatePromptRulesSnapshot(clone.PromptRules)
+
+	if err := config.SaveConfigPreserveComments(h.configFilePath, clone); err != nil {
+		helps.UpdatePromptRulesSnapshot(prev)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save config"})
+		return
+	}
+
+	h.cfgPtr.Store(clone)
+	if commit := h.loadCommit(); commit != nil {
+		commit(clone)
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
 func readPromptRulesBody(c *gin.Context) ([]config.PromptRule, bool) {

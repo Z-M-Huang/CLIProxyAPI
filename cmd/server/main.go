@@ -49,6 +49,7 @@ func init() {
 	buildinfo.Version = Version
 	buildinfo.Commit = Commit
 	buildinfo.BuildDate = BuildDate
+	managementasset.UseForkReleaseURLProvider()
 }
 
 // main is the entry point of the application.

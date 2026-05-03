@@ -112,15 +112,21 @@ The `feat/logging` deferred work targets the next release (`zmh-v0.2.0`).
 - We don't use the bare `vX.Y.Z` tag namespace — always `zmh-vX.Y.Z`.
 - We don't bake `static/management.html` into the docker image. The auto-updater fetches it from our GitHub Release at startup; if the release is missing, `/management.html` 404s until the next tick.
 
-## Code review gate (recommended for non-trivial changes)
+## Fork boundary guard
 
-For non-trivial PRs (a new feature, a refactor that touches more than a handful of files, anything affecting the customization surface), run a Codex CLI gpt-5.5 review before merging:
+`FORK_BOUNDARY.md` is the source of truth for fork-only files, patched upstream files, and the `// FORK[topic]: reason` marker convention.
 
+Run the boundary check before merging fork-only work:
+
+```bash
+bash scripts/check_fork_boundary.sh
 ```
-/dev-buddy-once Use the Codex CLI preset with gpt-5.5 to review the diff between origin/dev and feat/your-feature ...
-```
 
-Address every concrete finding before merging.
+To enable the local pre-commit hook in this clone:
+
+```bash
+git config core.hooksPath .githooks
+```
 
 ## Pointers
 
