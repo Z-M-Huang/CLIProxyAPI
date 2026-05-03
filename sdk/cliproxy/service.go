@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,14 @@ type Service struct {
 
 	// cfgMu protects concurrent access to the configuration.
 	cfgMu sync.RWMutex
+
+	// reloadMu serialises the full buildReloadCallback body so a
+	// file-watcher reload that overlaps a management commit cannot
+	// interleave their fan-out steps (oldCfg capture, server update,
+	// s.cfg swap, coreManager updates, executor rebind, watcher
+	// SetConfig + RefreshAuthState). Codex Stage 1 exit round 3
+	// IMPORTANT BE-R3-1.
+	reloadMu sync.Mutex
 
 	// configPath is the path to the configuration file.
 	configPath string
@@ -171,13 +180,27 @@ func (s *Service) emitAuthUpdate(ctx context.Context, update watcher.AuthUpdate)
 	s.handleAuthUpdate(ctx, update)
 }
 
+// configSnapshot returns the currently-installed config under cfgMu.RLock.
+// All goroutine-callable helpers (ensureExecutorsForAuthWithMode,
+// registerModelsForAuth, resolveConfig*Key, oauthExcludedModels) snapshot
+// once at entry so they observe a consistent config even while
+// buildReloadCallback's cfgMu.Lock writer is racing them. Phase C #23
+// routed mgmt commits through buildReloadCallback (Codex Phase C round-6
+// review BLOCKER #1).
+func (s *Service) configSnapshot() *config.Config {
+	if s == nil {
+		return nil
+	}
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return s.cfg
+}
+
 func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdate) {
 	if s == nil {
 		return
 	}
-	s.cfgMu.RLock()
-	cfg := s.cfg
-	s.cfgMu.RUnlock()
+	cfg := s.configSnapshot()
 	if cfg == nil || s.coreManager == nil {
 		return
 	}
@@ -378,6 +401,7 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 	if s == nil || s.coreManager == nil || a == nil {
 		return
 	}
+	cfg := s.configSnapshot()
 	if strings.EqualFold(strings.TrimSpace(a.Provider), "codex") {
 		if !forceReplace {
 			existingExecutor, hasExecutor := s.coreManager.Executor("codex")
@@ -388,7 +412,7 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 				}
 			}
 		}
-		s.coreManager.RegisterExecutor(executor.NewCodexAutoExecutor(s.cfg))
+		s.coreManager.RegisterExecutor(executor.NewCodexAutoExecutor(cfg))
 		return
 	}
 	// Skip disabled auth entries when (re)binding executors.
@@ -404,33 +428,33 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		if compatProviderKey == "" {
 			compatProviderKey = "openai-compatibility"
 		}
-		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor(compatProviderKey, s.cfg))
+		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor(compatProviderKey, cfg))
 		return
 	}
 	switch strings.ToLower(a.Provider) {
 	case "gemini":
-		s.coreManager.RegisterExecutor(executor.NewGeminiExecutor(s.cfg))
+		s.coreManager.RegisterExecutor(executor.NewGeminiExecutor(cfg))
 	case "vertex":
-		s.coreManager.RegisterExecutor(executor.NewGeminiVertexExecutor(s.cfg))
+		s.coreManager.RegisterExecutor(executor.NewGeminiVertexExecutor(cfg))
 	case "gemini-cli":
-		s.coreManager.RegisterExecutor(executor.NewGeminiCLIExecutor(s.cfg))
+		s.coreManager.RegisterExecutor(executor.NewGeminiCLIExecutor(cfg))
 	case "aistudio":
 		if s.wsGateway != nil {
-			s.coreManager.RegisterExecutor(executor.NewAIStudioExecutor(s.cfg, a.ID, s.wsGateway))
+			s.coreManager.RegisterExecutor(executor.NewAIStudioExecutor(cfg, a.ID, s.wsGateway))
 		}
 		return
 	case "antigravity":
-		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(s.cfg))
+		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(cfg))
 	case "claude":
-		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
+		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(cfg))
 	case "kimi":
-		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
+		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
 			providerKey = "openai-compatibility"
 		}
-		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor(providerKey, s.cfg))
+		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor(providerKey, cfg))
 	}
 }
 
@@ -443,6 +467,139 @@ func (s *Service) registerResolvedModelsForAuth(a *coreauth.Auth, providerKey st
 		return
 	}
 	GlobalModelRegistry().RegisterClient(a.ID, providerKey, models)
+}
+
+// buildReloadCallback returns the closure that fans a fresh config out to
+// every Service-level subsystem that needs to observe it: selector
+// strategy, retry config, pprof, the api.Server, the core auth Manager,
+// OAuth alias map, and provider executors. Used by both the file watcher
+// (passed to watcherFactory) and the management committer (set on the
+// api.Server via SetManagementCommitter) so both reload sources fan out
+// identically.
+func (s *Service) buildReloadCallback() func(*config.Config) {
+	return func(newCfg *config.Config) {
+		// reloadMu serialises the full callback body. Without it, a
+		// file-watcher reload could overlap a mgmt commit and either
+		// (a) compute a stale forceAuthRefresh predicate against an
+		// already-overwritten oldCfg, or (b) let an older callback
+		// overwrite s.cfg after a newer callback finished. Codex Stage
+		// 1 exit round 3 IMPORTANT BE-R3-1.
+		s.reloadMu.Lock()
+		defer s.reloadMu.Unlock()
+
+		previousStrategy := ""
+		var previousSessionAffinity bool
+		var previousSessionAffinityTTL string
+		// Snapshot the previous config too so we can compute the
+		// force-auth-refresh predicate identically to the file-watcher
+		// path (Codex Stage 1 exit round 2 BE-R2-2). Cleared after the
+		// final swap below.
+		var oldCfg *config.Config
+		s.cfgMu.RLock()
+		if s.cfg != nil {
+			previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
+			previousSessionAffinity = s.cfg.Routing.ClaudeCodeSessionAffinity || s.cfg.Routing.SessionAffinity
+			previousSessionAffinityTTL = s.cfg.Routing.SessionAffinityTTL
+			oldCfg = s.cfg
+		}
+		s.cfgMu.RUnlock()
+
+		if newCfg == nil {
+			s.cfgMu.RLock()
+			newCfg = s.cfg
+			s.cfgMu.RUnlock()
+		}
+		if newCfg == nil {
+			return
+		}
+
+		nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
+		normalizeStrategy := func(strategy string) string {
+			switch strategy {
+			case "fill-first", "fillfirst", "ff":
+				return "fill-first"
+			default:
+				return "round-robin"
+			}
+		}
+		previousStrategy = normalizeStrategy(previousStrategy)
+		nextStrategy = normalizeStrategy(nextStrategy)
+
+		nextSessionAffinity := newCfg.Routing.ClaudeCodeSessionAffinity || newCfg.Routing.SessionAffinity
+		nextSessionAffinityTTL := newCfg.Routing.SessionAffinityTTL
+
+		selectorChanged := previousStrategy != nextStrategy ||
+			previousSessionAffinity != nextSessionAffinity ||
+			previousSessionAffinityTTL != nextSessionAffinityTTL
+
+		if s.coreManager != nil && selectorChanged {
+			var selector coreauth.Selector
+			switch nextStrategy {
+			case "fill-first":
+				selector = &coreauth.FillFirstSelector{}
+			default:
+				selector = &coreauth.RoundRobinSelector{}
+			}
+
+			if nextSessionAffinity {
+				ttl := time.Hour
+				if ttlStr := strings.TrimSpace(nextSessionAffinityTTL); ttlStr != "" {
+					if parsed, err := time.ParseDuration(ttlStr); err == nil && parsed > 0 {
+						ttl = parsed
+					}
+				}
+				selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
+					Fallback: selector,
+					TTL:      ttl,
+				})
+			}
+
+			s.coreManager.SetSelector(selector)
+		}
+
+		s.applyRetryConfig(newCfg)
+		s.applyPprofConfig(newCfg)
+		if s.server != nil {
+			s.server.UpdateClients(newCfg)
+		}
+		s.cfgMu.Lock()
+		s.cfg = newCfg
+		s.cfgMu.Unlock()
+		if s.coreManager != nil {
+			s.coreManager.SetConfig(newCfg)
+			s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
+		}
+		s.rebindExecutors()
+		// Trigger watcher auth refresh so config-defined API key auths
+		// are re-synthesized and dispatched to subscribers in lockstep
+		// with the config swap (Codex Phase C round-4 review BLOCKER #1).
+		// SetConfig FIRST so RefreshAuthState reads the new snapshot —
+		// without that, the watcher would synthesize from its stale
+		// cached config (Codex Phase C round-5 review BLOCKER #1).
+		//
+		// Compute force using the same predicate as the file-watcher
+		// reload path (internal/watcher/config_reload.go): edits to
+		// ForceModelPrefix / OAuthModelAlias / retry-config affect
+		// model registration but are not part of the synthesized auth
+		// state, so without forcing we'd miss re-registration when the
+		// user PUTs one of these via mgmt API (Codex Stage 1 exit round 2
+		// BE-R2-2). Other mgmt writes (PutDebug, PutRequestLog, single
+		// API key edits) leave force=false and the watcher's diffing
+		// emits add/modify/delete only for auths whose synthesized
+		// state actually changed (Codex Stage 1 exit round 1 BE-3).
+		retryConfigChanged := oldCfg != nil &&
+			(oldCfg.RequestRetry != newCfg.RequestRetry ||
+				oldCfg.MaxRetryInterval != newCfg.MaxRetryInterval ||
+				oldCfg.MaxRetryCredentials != newCfg.MaxRetryCredentials)
+		forceAuthRefresh := oldCfg != nil &&
+			(oldCfg.ForceModelPrefix != newCfg.ForceModelPrefix ||
+				!reflect.DeepEqual(oldCfg.OAuthModelAlias, newCfg.OAuthModelAlias) ||
+				retryConfigChanged)
+		if s.watcher != nil {
+			s.watcher.SetConfig(newCfg)
+			s.watcher.RefreshAuthState(forceAuthRefresh)
+		}
+	}
 }
 
 // rebindExecutors refreshes provider executors so they observe the latest configuration.
@@ -552,6 +709,17 @@ func (s *Service) Run(ctx context.Context) error {
 		s.hooks.OnBeforeStart(s.cfg)
 	}
 
+	// Define reloadCallback and wire the management committer BEFORE the
+	// HTTP server starts serving. Without that ordering, mgmt writes that
+	// arrive between server.Start() and SetManagementCommitter() would
+	// fire only the default partial hook (Server.UpdateClients) and skip
+	// coreManager.SetConfig/SetOAuthModelAlias/rebindExecutors (Codex
+	// Phase C round-4 review IMPORTANT #3).
+	reloadCallback := s.buildReloadCallback()
+	if s.server != nil {
+		s.server.SetManagementCommitter(reloadCallback)
+	}
+
 	// Register callback for startup and periodic model catalog refresh.
 	// When remote model definitions change, re-register models for affected providers.
 	// This intentionally rebuilds per-auth model availability from the latest catalog
@@ -609,85 +777,6 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	var watcherWrapper *WatcherWrapper
-	reloadCallback := func(newCfg *config.Config) {
-		previousStrategy := ""
-		var previousSessionAffinity bool
-		var previousSessionAffinityTTL string
-		s.cfgMu.RLock()
-		if s.cfg != nil {
-			previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
-			previousSessionAffinity = s.cfg.Routing.ClaudeCodeSessionAffinity || s.cfg.Routing.SessionAffinity
-			previousSessionAffinityTTL = s.cfg.Routing.SessionAffinityTTL
-		}
-		s.cfgMu.RUnlock()
-
-		if newCfg == nil {
-			s.cfgMu.RLock()
-			newCfg = s.cfg
-			s.cfgMu.RUnlock()
-		}
-		if newCfg == nil {
-			return
-		}
-
-		nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
-		normalizeStrategy := func(strategy string) string {
-			switch strategy {
-			case "fill-first", "fillfirst", "ff":
-				return "fill-first"
-			default:
-				return "round-robin"
-			}
-		}
-		previousStrategy = normalizeStrategy(previousStrategy)
-		nextStrategy = normalizeStrategy(nextStrategy)
-
-		nextSessionAffinity := newCfg.Routing.ClaudeCodeSessionAffinity || newCfg.Routing.SessionAffinity
-		nextSessionAffinityTTL := newCfg.Routing.SessionAffinityTTL
-
-		selectorChanged := previousStrategy != nextStrategy ||
-			previousSessionAffinity != nextSessionAffinity ||
-			previousSessionAffinityTTL != nextSessionAffinityTTL
-
-		if s.coreManager != nil && selectorChanged {
-			var selector coreauth.Selector
-			switch nextStrategy {
-			case "fill-first":
-				selector = &coreauth.FillFirstSelector{}
-			default:
-				selector = &coreauth.RoundRobinSelector{}
-			}
-
-			if nextSessionAffinity {
-				ttl := time.Hour
-				if ttlStr := strings.TrimSpace(nextSessionAffinityTTL); ttlStr != "" {
-					if parsed, err := time.ParseDuration(ttlStr); err == nil && parsed > 0 {
-						ttl = parsed
-					}
-				}
-				selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
-					Fallback: selector,
-					TTL:      ttl,
-				})
-			}
-
-			s.coreManager.SetSelector(selector)
-		}
-
-		s.applyRetryConfig(newCfg)
-		s.applyPprofConfig(newCfg)
-		if s.server != nil {
-			s.server.UpdateClients(newCfg)
-		}
-		s.cfgMu.Lock()
-		s.cfg = newCfg
-		s.cfgMu.Unlock()
-		if s.coreManager != nil {
-			s.coreManager.SetConfig(newCfg)
-			s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
-		}
-		s.rebindExecutors()
-	}
 
 	watcherWrapper, err = s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
 	if err != nil {
@@ -821,6 +910,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		GlobalModelRegistry().UnregisterClient(a.ID)
 		return
 	}
+	cfg := s.configSnapshot()
 	authKind := strings.ToLower(strings.TrimSpace(a.Attributes["auth_kind"]))
 	if authKind == "" {
 		if kind, _ := a.AccountInfo(); strings.EqualFold(kind, "api_key") {
@@ -846,7 +936,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	if compatDetected {
 		provider = "openai-compatibility"
 	}
-	excluded := s.oauthExcludedModels(provider, authKind)
+	excluded := s.oauthExcludedModels(cfg, provider, authKind)
 	// The synthesizer pre-merges per-account and global exclusions into the "excluded_models" attribute.
 	// If this attribute is present, it represents the complete list of exclusions and overrides the global config.
 	if a.Attributes != nil {
@@ -858,7 +948,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	switch provider {
 	case "gemini":
 		models = registry.GetGeminiModels()
-		if entry := s.resolveConfigGeminiKey(a); entry != nil {
+		if entry := resolveConfigGeminiKey(cfg, a); entry != nil {
 			if len(entry.Models) > 0 {
 				models = buildGeminiConfigModels(entry)
 			}
@@ -870,7 +960,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	case "vertex":
 		// Vertex AI Gemini supports the same model identifiers as Gemini.
 		models = registry.GetGeminiVertexModels()
-		if entry := s.resolveConfigVertexCompatKey(a); entry != nil {
+		if entry := resolveConfigVertexCompatKey(cfg, a); entry != nil {
 			if len(entry.Models) > 0 {
 				models = buildVertexCompatConfigModels(entry)
 			}
@@ -890,7 +980,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = applyExcludedModels(models, excluded)
 	case "claude":
 		models = registry.GetClaudeModels()
-		if entry := s.resolveConfigClaudeKey(a); entry != nil {
+		if entry := resolveConfigClaudeKey(cfg, a); entry != nil {
 			if len(entry.Models) > 0 {
 				models = buildClaudeConfigModels(entry)
 			}
@@ -916,7 +1006,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		default:
 			models = registry.GetCodexProModels()
 		}
-		if entry := s.resolveConfigCodexKey(a); entry != nil {
+		if entry := resolveConfigCodexKey(cfg, a); entry != nil {
 			if len(entry.Models) > 0 {
 				models = buildCodexConfigModels(entry)
 			}
@@ -930,7 +1020,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
-		if s.cfg != nil {
+		if cfg != nil {
 			providerKey := provider
 			compatName := strings.TrimSpace(a.Provider)
 			isCompatAuth := false
@@ -967,8 +1057,8 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 					isCompatAuth = true
 				}
 			}
-			for i := range s.cfg.OpenAICompatibility {
-				compat := &s.cfg.OpenAICompatibility[i]
+			for i := range cfg.OpenAICompatibility {
+				compat := &cfg.OpenAICompatibility[i]
 				if compat.Disabled {
 					continue
 				}
@@ -1003,7 +1093,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 						if providerKey == "" {
 							providerKey = "openai-compatibility"
 						}
-						s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix))
+						s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
 					} else {
 						// Ensure stale registrations are cleared when model list becomes empty.
 						GlobalModelRegistry().UnregisterClient(a.ID)
@@ -1018,13 +1108,13 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 			}
 		}
 	}
-	models = applyOAuthModelAlias(s.cfg, provider, authKind, models)
+	models = applyOAuthModelAlias(cfg, provider, authKind, models)
 	if len(models) > 0 {
 		key := provider
 		if key == "" {
 			key = strings.ToLower(strings.TrimSpace(a.Provider))
 		}
-		s.registerResolvedModelsForAuth(a, key, applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
+		s.registerResolvedModelsForAuth(a, key, applyModelPrefixes(models, a.Prefix, cfg != nil && cfg.ForceModelPrefix))
 		return
 	}
 
@@ -1080,8 +1170,12 @@ func (s *Service) latestAuthForModelRegistration(authID string) (*coreauth.Auth,
 	return auth, true
 }
 
-func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey {
-	if auth == nil || s.cfg == nil {
+// resolveConfigClaudeKey, resolveConfigGeminiKey, resolveConfigVertexCompatKey,
+// and resolveConfigCodexKey accept a cfg snapshot rather than reading
+// s.cfg directly so the caller's per-call snapshot covers the full
+// resolution. Phase C round-6 review BLOCKER #1.
+func resolveConfigClaudeKey(cfg *config.Config, auth *coreauth.Auth) *config.ClaudeKey {
+	if auth == nil || cfg == nil {
 		return nil
 	}
 	var attrKey, attrBase string
@@ -1089,8 +1183,8 @@ func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey 
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
 	}
-	for i := range s.cfg.ClaudeKey {
-		entry := &s.cfg.ClaudeKey[i]
+	for i := range cfg.ClaudeKey {
+		entry := &cfg.ClaudeKey[i]
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
 		if attrKey != "" && attrBase != "" {
@@ -1109,8 +1203,8 @@ func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey 
 		}
 	}
 	if attrKey != "" {
-		for i := range s.cfg.ClaudeKey {
-			entry := &s.cfg.ClaudeKey[i]
+		for i := range cfg.ClaudeKey {
+			entry := &cfg.ClaudeKey[i]
 			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
 				return entry
 			}
@@ -1119,8 +1213,8 @@ func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey 
 	return nil
 }
 
-func (s *Service) resolveConfigGeminiKey(auth *coreauth.Auth) *config.GeminiKey {
-	if auth == nil || s.cfg == nil {
+func resolveConfigGeminiKey(cfg *config.Config, auth *coreauth.Auth) *config.GeminiKey {
+	if auth == nil || cfg == nil {
 		return nil
 	}
 	var attrKey, attrBase string
@@ -1128,8 +1222,8 @@ func (s *Service) resolveConfigGeminiKey(auth *coreauth.Auth) *config.GeminiKey 
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
 	}
-	for i := range s.cfg.GeminiKey {
-		entry := &s.cfg.GeminiKey[i]
+	for i := range cfg.GeminiKey {
+		entry := &cfg.GeminiKey[i]
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
 		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
@@ -1145,8 +1239,8 @@ func (s *Service) resolveConfigGeminiKey(auth *coreauth.Auth) *config.GeminiKey 
 	return nil
 }
 
-func (s *Service) resolveConfigVertexCompatKey(auth *coreauth.Auth) *config.VertexCompatKey {
-	if auth == nil || s.cfg == nil {
+func resolveConfigVertexCompatKey(cfg *config.Config, auth *coreauth.Auth) *config.VertexCompatKey {
+	if auth == nil || cfg == nil {
 		return nil
 	}
 	var attrKey, attrBase string
@@ -1154,8 +1248,8 @@ func (s *Service) resolveConfigVertexCompatKey(auth *coreauth.Auth) *config.Vert
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
 	}
-	for i := range s.cfg.VertexCompatAPIKey {
-		entry := &s.cfg.VertexCompatAPIKey[i]
+	for i := range cfg.VertexCompatAPIKey {
+		entry := &cfg.VertexCompatAPIKey[i]
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
 		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
@@ -1169,8 +1263,8 @@ func (s *Service) resolveConfigVertexCompatKey(auth *coreauth.Auth) *config.Vert
 		}
 	}
 	if attrKey != "" {
-		for i := range s.cfg.VertexCompatAPIKey {
-			entry := &s.cfg.VertexCompatAPIKey[i]
+		for i := range cfg.VertexCompatAPIKey {
+			entry := &cfg.VertexCompatAPIKey[i]
 			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
 				return entry
 			}
@@ -1179,8 +1273,8 @@ func (s *Service) resolveConfigVertexCompatKey(auth *coreauth.Auth) *config.Vert
 	return nil
 }
 
-func (s *Service) resolveConfigCodexKey(auth *coreauth.Auth) *config.CodexKey {
-	if auth == nil || s.cfg == nil {
+func resolveConfigCodexKey(cfg *config.Config, auth *coreauth.Auth) *config.CodexKey {
+	if auth == nil || cfg == nil {
 		return nil
 	}
 	var attrKey, attrBase string
@@ -1188,8 +1282,8 @@ func (s *Service) resolveConfigCodexKey(auth *coreauth.Auth) *config.CodexKey {
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
 	}
-	for i := range s.cfg.CodexKey {
-		entry := &s.cfg.CodexKey[i]
+	for i := range cfg.CodexKey {
+		entry := &cfg.CodexKey[i]
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
 		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
@@ -1205,8 +1299,7 @@ func (s *Service) resolveConfigCodexKey(auth *coreauth.Auth) *config.CodexKey {
 	return nil
 }
 
-func (s *Service) oauthExcludedModels(provider, authKind string) []string {
-	cfg := s.cfg
+func (s *Service) oauthExcludedModels(cfg *config.Config, provider, authKind string) []string {
 	if cfg == nil {
 		return nil
 	}

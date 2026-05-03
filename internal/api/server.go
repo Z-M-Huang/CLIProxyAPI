@@ -140,11 +140,22 @@ type Server struct {
 	// handlers contains the API handlers for processing requests.
 	handlers *handlers.BaseAPIHandler
 
-	// cfg holds the current server configuration.
-	cfg *config.Config
+	// cfgPtr holds the current server configuration behind an atomic.Pointer
+	// so request handlers, OAuth callbacks, /management.html serving, and the
+	// hot-reload watcher all observe a stable snapshot without locks. Writers
+	// (UpdateClients, mgmt clone-modify-persist-swap) atomic.Store the new
+	// config; readers atomic.Load via Server.Config() at request entry.
+	cfgPtr atomic.Pointer[config.Config]
+
+	// updateMu serializes UpdateClients fan-out so that two concurrent
+	// hot-reload sources (file-watcher, mgmt clone-modify-persist-commit)
+	// never overlap their delta computation against oldConfigYaml. Held for
+	// the entire UpdateClients body. (Codex Phase C IMPORTANT #6.)
+	updateMu sync.Mutex
 
 	// oldConfigYaml stores a YAML snapshot of the previous configuration for change detection.
 	// This prevents issues when the config object is modified in place by Management API.
+	// Always read/written under updateMu.
 	oldConfigYaml []byte
 
 	// accessManager handles request authentication providers.
@@ -254,7 +265,6 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s := &Server{
 		engine:              engine,
 		handlers:            handlers.NewBaseAPIHandlers(&cfg.SDKConfig, authManager),
-		cfg:                 cfg,
 		accessManager:       accessManager,
 		requestLogger:       requestLogger,
 		loggerToggle:        toggle,
@@ -263,6 +273,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		envManagementSecret: envManagementSecret,
 		wsRoutes:            make(map[string]struct{}),
 	}
+	s.cfgPtr.Store(cfg)
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	// Save initial YAML snapshot
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
@@ -273,8 +284,14 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	managementasset.SetCurrentConfig(cfg)
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	applySignatureCacheConfig(nil, cfg)
-	// Initialize management handler
+	// Initialize management handler. The commit hook wires mgmt
+	// clone-modify-persist-swap into the Server's full fan-out path so a
+	// PUT/PATCH/DELETE response body waits for log/auth/AMP/cache reconfig
+	// before returning, matching the prior in-place semantics.
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
+	s.mgmt.SetConfigCommitter(func(next *config.Config) {
+		s.UpdateClients(next)
+	})
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
 	}
@@ -406,7 +423,7 @@ func (s *Server) setupRoutes() {
 			errStr = c.Query("error_description")
 		}
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "anthropic", state, code, errStr)
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.Config().AuthDir, "anthropic", state, code, errStr)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -420,7 +437,7 @@ func (s *Server) setupRoutes() {
 			errStr = c.Query("error_description")
 		}
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "codex", state, code, errStr)
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.Config().AuthDir, "codex", state, code, errStr)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -434,7 +451,7 @@ func (s *Server) setupRoutes() {
 			errStr = c.Query("error_description")
 		}
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "gemini", state, code, errStr)
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.Config().AuthDir, "gemini", state, code, errStr)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -448,7 +465,7 @@ func (s *Server) setupRoutes() {
 			errStr = c.Query("error_description")
 		}
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "antigravity", state, code, errStr)
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.Config().AuthDir, "antigravity", state, code, errStr)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -678,7 +695,7 @@ func (s *Server) managementAvailabilityMiddleware() gin.HandlerFunc {
 }
 
 func (s *Server) serveManagementControlPanel(c *gin.Context) {
-	cfg := s.cfg
+	cfg := s.Config()
 	if cfg == nil || cfg.RemoteManagement.DisableControlPanel {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
@@ -820,10 +837,11 @@ func (s *Server) Start() error {
 		return fmt.Errorf("failed to start HTTP server: %v", errListen)
 	}
 
-	useTLS := s.cfg != nil && s.cfg.TLS.Enable
+	cfg := s.Config()
+	useTLS := cfg != nil && cfg.TLS.Enable
 	if useTLS {
-		certPath := strings.TrimSpace(s.cfg.TLS.Cert)
-		keyPath := strings.TrimSpace(s.cfg.TLS.Key)
+		certPath := strings.TrimSpace(cfg.TLS.Cert)
+		keyPath := strings.TrimSpace(cfg.TLS.Key)
 		if certPath == "" || keyPath == "" {
 			if errClose := listener.Close(); errClose != nil {
 				log.Errorf("failed to close listener after TLS validation failure: %v", errClose)
@@ -940,6 +958,16 @@ func (s *Server) Stop(ctx context.Context) error {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
 	}
 
+	// Drain the async request logger before returning so queued normal
+	// logs write to disk and forced-error logs are flushed (Phase C plan
+	// §"Flush/Close on graceful shutdown"). The interface is closed-set,
+	// so we type-assert against the optional Close hook.
+	if s.requestLogger != nil {
+		if closer, ok := s.requestLogger.(interface{ Close() }); ok {
+			closer.Close()
+		}
+	}
+
 	log.Debug("API server stopped")
 	return nil
 }
@@ -973,13 +1001,58 @@ func (s *Server) applyAccessConfig(oldCfg, newCfg *config.Config) {
 	}
 }
 
+// Config returns the current server config snapshot. Safe to call from any
+// goroutine; the returned pointer is immutable for the duration of the
+// caller's use. Callers MUST NOT mutate the returned struct — config writes
+// go through clone-modify-persist-swap (mgmt handlers) or UpdateClients.
+func (s *Server) Config() *config.Config {
+	if s == nil {
+		return nil
+	}
+	return s.cfgPtr.Load()
+}
+
+// SetManagementCommitter overrides the management handler's config commit
+// hook. The default hook (set in NewServer) calls Server.UpdateClients,
+// which is the appropriate scope for an embedded api.Server with no
+// higher-level service to fan out to.
+//
+// Service-level callers (sdk/cliproxy/service.go) override this to fire
+// the full reload path so management writes trigger the SAME fan-out as
+// the file watcher: coreManager.SetConfig, SetOAuthModelAlias,
+// rebindExecutors, applyRetryConfig, applyPprofConfig, etc. Without this
+// override, mgmt PUT/PATCH/DELETE responds 200 but the change does not
+// reach the executor layer until the file watcher fires (or never, in
+// embedded paths with no watcher) — see Codex Phase C round-3 review
+// BLOCKER #1.
+//
+// Pass nil to restore the default UpdateClients-only hook.
+func (s *Server) SetManagementCommitter(commit func(*config.Config)) {
+	if s == nil || s.mgmt == nil {
+		return
+	}
+	if commit == nil {
+		s.mgmt.SetConfigCommitter(func(next *config.Config) {
+			s.UpdateClients(next)
+		})
+		return
+	}
+	s.mgmt.SetConfigCommitter(commit)
+}
+
 // UpdateClients updates the server's client list and configuration.
 // This method is called when the configuration or authentication tokens change.
 //
+// Serialized via s.updateMu so concurrent fan-outs (file-watcher reload + a
+// mgmt clone-modify-persist-commit firing in parallel) cannot interleave
+// their delta computation against oldConfigYaml.
+//
 // Parameters:
-//   - clients: The new slice of AI service clients
 //   - cfg: The new application configuration
 func (s *Server) UpdateClients(cfg *config.Config) {
+	s.updateMu.Lock()
+	defer s.updateMu.Unlock()
+
 	// Reconstruct old config from YAML snapshot to avoid reference sharing issues
 	var oldCfg *config.Config
 	if len(s.oldConfigYaml) > 0 {
@@ -1072,7 +1145,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	redisqueue.SetEnabled(s.managementRoutesEnabled.Load())
 
 	s.applyAccessConfig(oldCfg, cfg)
-	s.cfg = cfg
+	s.cfgPtr.Store(cfg)
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	if oldCfg != nil && s.wsAuthChanged != nil && oldCfg.WebsocketAuth != cfg.WebsocketAuth {
 		s.wsAuthChanged(oldCfg.WebsocketAuth, cfg.WebsocketAuth)

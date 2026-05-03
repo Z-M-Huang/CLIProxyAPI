@@ -25,22 +25,13 @@ import (
 )
 
 const (
-	// defaultManagementReleaseURL points at the fork's frontend release feed.
-	// The auto-updater pulls management.html from "latest" here every
-	// updateCheckInterval. The fork-controlled fallback URL upstream used
-	// (https://cpamc.router-for.me/) is intentionally absent — if the GitHub
-	// release fetch fails the updater leaves whatever local asset already
-	// exists in place; if no local asset exists, /management.html returns 404
-	// until the next successful fetch. The server.go safety net at
-	// serveManagementControlPanel re-runs the fetch synchronously on first
-	// /management.html request when the local asset is missing, so a fresh
-	// container without a baked bundle still recovers on first hit.
-	defaultManagementReleaseURL = "https://api.github.com/repos/Z-M-Huang/Cli-Proxy-API-Management-Center/releases/latest"
-	managementAssetName         = "management.html"
-	httpUserAgent               = "CLIProxyAPI-management-updater"
-	managementSyncMinInterval   = 30 * time.Second
-	updateCheckInterval         = 3 * time.Hour
-	maxAssetDownloadSize        = 50 << 20 // 10 MB safety limit for management asset downloads
+	defaultManagementReleaseURL  = "https://api.github.com/repos/router-for-me/Cli-Proxy-API-Management-Center/releases/latest"
+	defaultManagementFallbackURL = "https://cpamc.router-for.me/"
+	managementAssetName          = "management.html"
+	httpUserAgent                = "CLIProxyAPI-management-updater"
+	managementSyncMinInterval    = 30 * time.Second
+	updateCheckInterval          = 3 * time.Hour
+	maxAssetDownloadSize         = 50 << 20 // 10 MB safety limit for management asset downloads
 )
 
 // ManagementFileName exposes the control panel asset filename.
@@ -53,7 +44,78 @@ var (
 	schedulerOnce       sync.Once
 	schedulerConfigPath atomic.Value
 	sfGroup             singleflight.Group
+
+	// activeReleaseURLProvider is the currently-registered release URL
+	// provider. The default impl returns the upstream constants verbatim,
+	// keeping behavior identical to pre-seam code. Forks can override at
+	// init time via SetReleaseURLProvider to point the auto-updater at a
+	// different release artifact location without modifying this file.
+	//
+	// Wrapped in a *providerHolder so atomic.Value sees the same concrete
+	// type on every Store (atomic.Value rejects type-inconsistent Stores).
+	activeReleaseURLProvider atomic.Value // *providerHolder
 )
+
+// ReleaseURLProvider supplies the GitHub releases endpoint and the unverified
+// fallback URL used by the management-asset auto-updater. The default impl
+// returns the upstream router-for-me URLs unchanged. Forks register a custom
+// impl during init to point the auto-updater at a different artifact.
+type ReleaseURLProvider interface {
+	// ReleaseURL returns the GitHub /releases/latest endpoint that fetches
+	// the management-asset release metadata when no per-config repository
+	// override is supplied.
+	ReleaseURL() string
+	// FallbackURL returns the URL the auto-updater downloads from when the
+	// release-metadata path fails. The fallback is fetched without digest
+	// verification, so callers should rate-limit and log loudly.
+	FallbackURL() string
+}
+
+type defaultReleaseURLProvider struct{}
+
+func (defaultReleaseURLProvider) ReleaseURL() string  { return defaultManagementReleaseURL }
+func (defaultReleaseURLProvider) FallbackURL() string { return defaultManagementFallbackURL }
+
+// providerHolder pins atomic.Value to a single concrete type while still
+// letting the wrapped interface vary across Stores.
+type providerHolder struct {
+	p ReleaseURLProvider
+}
+
+func init() {
+	activeReleaseURLProvider.Store(&providerHolder{p: defaultReleaseURLProvider{}})
+}
+
+// SetReleaseURLProvider registers p as the active release URL provider. Pass
+// nil to restore the upstream defaults. Safe to call from package init.
+func SetReleaseURLProvider(p ReleaseURLProvider) {
+	if p == nil {
+		activeReleaseURLProvider.Store(&providerHolder{p: defaultReleaseURLProvider{}})
+		return
+	}
+	activeReleaseURLProvider.Store(&providerHolder{p: p})
+}
+
+func currentReleaseURLProvider() ReleaseURLProvider {
+	if h, ok := activeReleaseURLProvider.Load().(*providerHolder); ok && h != nil && h.p != nil {
+		return h.p
+	}
+	return defaultReleaseURLProvider{}
+}
+
+func currentReleaseURL() string {
+	if u := strings.TrimSpace(currentReleaseURLProvider().ReleaseURL()); u != "" {
+		return u
+	}
+	return defaultManagementReleaseURL
+}
+
+func currentFallbackURL() string {
+	if u := strings.TrimSpace(currentReleaseURLProvider().FallbackURL()); u != "" {
+		return u
+	}
+	return defaultManagementFallbackURL
+}
 
 // SetCurrentConfig stores the latest configuration snapshot for management asset decisions.
 func SetCurrentConfig(cfg *config.Config) {
@@ -283,15 +345,34 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 	return err == nil
 }
 
+func ensureFallbackManagementHTML(ctx context.Context, client *http.Client, localPath string) bool {
+	data, downloadedHash, err := downloadAsset(ctx, client, currentFallbackURL())
+	if err != nil {
+		log.WithError(err).Warn("failed to download fallback management control panel page")
+		return false
+	}
+
+	log.Warnf("management asset downloaded from fallback URL without digest verification (hash=%s) — "+
+		"enable verified GitHub updates by keeping disable-auto-update-panel set to false", downloadedHash)
+
+	if err = atomicWriteFile(localPath, data); err != nil {
+		log.WithError(err).Warn("failed to persist fallback management control panel page")
+		return false
+	}
+
+	log.Infof("management asset updated from fallback page successfully (hash=%s)", downloadedHash)
+	return true
+}
 func resolveReleaseURL(repo string) string {
 	repo = strings.TrimSpace(repo)
+	defaultURL := currentReleaseURL()
 	if repo == "" {
-		return defaultManagementReleaseURL
+		return defaultURL
 	}
 
 	parsed, err := url.Parse(repo)
 	if err != nil || parsed.Host == "" {
-		return defaultManagementReleaseURL
+		return defaultURL
 	}
 
 	host := strings.ToLower(parsed.Host)
@@ -312,12 +393,12 @@ func resolveReleaseURL(repo string) string {
 		}
 	}
 
-	return defaultManagementReleaseURL
+	return defaultURL
 }
 
 func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL string) (*releaseAsset, string, error) {
 	if strings.TrimSpace(releaseURL) == "" {
-		releaseURL = defaultManagementReleaseURL
+		releaseURL = currentReleaseURL()
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, releaseURL, nil)
