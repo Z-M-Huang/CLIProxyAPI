@@ -2,7 +2,7 @@
 
 This is a soft fork of [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). The fork carries fork-specific features on top of upstream while continuing to absorb upstream improvements over time.
 
-If you're a human collaborator or an AI coding assistant, **read this before opening a branch or PR**. The same workflow is referenced by [`AGENTS.md`](./AGENTS.md) and [`CLAUDE.md`](./CLAUDE.md).
+If you're a human collaborator or an AI coding assistant, **read this before opening a branch or PR**. Shared assistant guidance lives in [`docs/ai-assistant-guidance.md`](./docs/ai-assistant-guidance.md), which is imported by [`AGENTS.md`](./AGENTS.md) and [`CLAUDE.md`](./CLAUDE.md).
 
 ## Goals
 
@@ -72,6 +72,7 @@ These are the files where the fork diverges from upstream. When syncing upstream
 - `internal/managementasset/updater.go` — `defaultManagementReleaseURL`; the upstream `cpamc.router-for.me` fallback is intentionally absent.
 - `internal/api/handlers/management/config_basic.go` — `latestReleaseURL` (the `/v0/management/latest-version` endpoint).
 - `README.md`, `README_CN.md`, `README_JA.md` — fork notice block at the top; sponsor block replaced with an upstream pointer.
+- `AGENTS.md`, `CLAUDE.md`, `docs/ai-assistant-guidance.md` — shared assistant guidance and imports.
 - `.github/workflows/` — the fork keeps **no** GHA workflows. If upstream re-introduces any, re-delete them on sync.
 - `.github/FUNDING.yml` — absent on the fork; do not re-add.
 
@@ -114,7 +115,7 @@ The `feat/logging` deferred work targets the next release (`zmh-v0.2.0`).
 
 ## Fork boundary guard
 
-`FORK_BOUNDARY.md` is the source of truth for fork-only files, patched upstream files, and the `// FORK[topic]: reason` marker convention.
+[`docs/ai-assistant-guidance.md`](./docs/ai-assistant-guidance.md) documents fork-only files, patched upstream files, and the `// FORK[topic]: reason` marker convention. `scripts/check_fork_boundary.sh` enforces that list for fork-only work.
 
 Run the boundary check before merging fork-only work:
 
@@ -132,4 +133,4 @@ git config core.hooksPath .githooks
 
 - Plan / decision history: `/home/ubuntu/.claude/plans/we-are-in-a-nested-emerson.md` (local-only).
 - Upstream: <https://github.com/router-for-me/CLIProxyAPI>.
-- Frontend fork: <https://github.com/Z-M-Huang/Cli-Proxy-API-Management-Center>.
+- Frontend fork: <https://github.com/Z-M-Huang/Cli-Proxy-API-Management-Center> (local sibling checkout: `../Cli-Proxy-API-Management-Center`).

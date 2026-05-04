@@ -30,11 +30,13 @@ done
 
 owned_paths=(
   ".githooks/pre-commit"
+  "AGENTS.md"
+  "CLAUDE.md"
   "CONTRIBUTING.md"
-  "FORK_BOUNDARY.md"
   "README.md"
   "README_CN.md"
   "README_JA.md"
+  "docs/ai-assistant-guidance.md"
   "internal/api/handlers/management/prompt_rules.go"
   "internal/api/handlers/management/prompt_rules_test.go"
   "internal/config/prompt_rules.go"
