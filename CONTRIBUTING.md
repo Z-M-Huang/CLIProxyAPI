@@ -2,7 +2,7 @@
 
 This is a soft fork of [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). The fork carries fork-specific features on top of upstream while continuing to absorb upstream improvements over time.
 
-If you're a human collaborator or an AI coding assistant, **read this before opening a branch or PR**. The same workflow is referenced by [`AGENTS.md`](./AGENTS.md) and [`CLAUDE.md`](./CLAUDE.md).
+If you're a human collaborator or an AI coding assistant, **read this before opening a branch or PR**. Shared assistant guidance lives in [`docs/ai-assistant-guidance.md`](./docs/ai-assistant-guidance.md), which is imported by [`AGENTS.md`](./AGENTS.md) and [`CLAUDE.md`](./CLAUDE.md).
 
 ## Goals
 
@@ -72,6 +72,7 @@ These are the files where the fork diverges from upstream. When syncing upstream
 - `internal/managementasset/updater.go` — `defaultManagementReleaseURL`; the upstream `cpamc.router-for.me` fallback is intentionally absent.
 - `internal/api/handlers/management/config_basic.go` — `latestReleaseURL` (the `/v0/management/latest-version` endpoint).
 - `README.md`, `README_CN.md`, `README_JA.md` — fork notice block at the top; sponsor block replaced with an upstream pointer.
+- `AGENTS.md`, `CLAUDE.md`, `docs/ai-assistant-guidance.md` — shared assistant guidance and imports.
 - `.github/workflows/` — the fork keeps **no** GHA workflows. If upstream re-introduces any, re-delete them on sync.
 - `.github/FUNDING.yml` — absent on the fork; do not re-add.
 
@@ -112,18 +113,24 @@ The `feat/logging` deferred work targets the next release (`zmh-v0.2.0`).
 - We don't use the bare `vX.Y.Z` tag namespace — always `zmh-vX.Y.Z`.
 - We don't bake `static/management.html` into the docker image. The auto-updater fetches it from our GitHub Release at startup; if the release is missing, `/management.html` 404s until the next tick.
 
-## Code review gate (recommended for non-trivial changes)
+## Fork boundary guard
 
-For non-trivial PRs (a new feature, a refactor that touches more than a handful of files, anything affecting the customization surface), run a Codex CLI gpt-5.5 review before merging:
+[`docs/ai-assistant-guidance.md`](./docs/ai-assistant-guidance.md) documents fork-only files, patched upstream files, and the `// FORK[topic]: reason` marker convention. `scripts/check_fork_boundary.sh` enforces that list for fork-only work.
 
+Run the boundary check before merging fork-only work:
+
+```bash
+bash scripts/check_fork_boundary.sh
 ```
-/dev-buddy-once Use the Codex CLI preset with gpt-5.5 to review the diff between origin/dev and feat/your-feature ...
-```
 
-Address every concrete finding before merging.
+To enable the local pre-commit hook in this clone:
+
+```bash
+git config core.hooksPath .githooks
+```
 
 ## Pointers
 
 - Plan / decision history: `/home/ubuntu/.claude/plans/we-are-in-a-nested-emerson.md` (local-only).
 - Upstream: <https://github.com/router-for-me/CLIProxyAPI>.
-- Frontend fork: <https://github.com/Z-M-Huang/Cli-Proxy-API-Management-Center>.
+- Frontend fork: <https://github.com/Z-M-Huang/Cli-Proxy-API-Management-Center> (local sibling checkout: `../Cli-Proxy-API-Management-Center`).
