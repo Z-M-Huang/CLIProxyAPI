@@ -164,6 +164,21 @@ Current fork topics:
 - `management-asset`: fork release feed and fallback asset wiring for `management.html`.
 - `releases`: `zmh-v*` tag namespace and fork repo links.
 
+## Upstream Conflict Playbook
+
+When merging `upstream/dev`, resolve conflicts by intent rather than mechanically choosing one side:
+
+1. Keep fork identity, release wiring, repository URLs, assistant guidance, README fork notices, Docker image names, and `zmh-v*` tag behavior from this fork.
+2. Take upstream's generic bug fixes, protocol updates, dependency updates, tests, and refactors unless they directly remove or break a fork feature.
+3. When upstream changes code that a fork feature touches, adapt the fork feature to the upstream shape instead of reverting the upstream change. Preserve both behaviors when they are distinct compatibility surfaces.
+4. For overlapping management APIs, keep fork endpoints stable and add upstream endpoints alongside them when they serve different clients. Example: keep this fork's in-memory usage snapshot/import/export API while also accepting upstream's usage-queue API.
+5. For metadata or request-routing conflicts, preserve upstream's client-visible semantics and apply fork behavior at the narrowest later point. Example: store the client requested model alias for usage accounting, while applying prompt rules against the normalized model routed by the fork.
+6. For generated files, resolve the source manifest first, regenerate the generated artifact with the repo's toolchain, and review the diff instead of hand-editing generated output.
+7. For conflicts outside the customization surface, stop and understand why the overlap exists before resolving it. Treat repeated conflicts in the same area as a signal to extract a fork-owned hook or helper.
+8. Add or keep tests that prove both the upstream behavior and the fork adaptation still work.
+9. The fork-boundary pre-commit hook is for fork-only work and intentionally skips `sync/upstream-*` branches; do not use that skip for normal feature work.
+10. In the sync PR, document each non-trivial conflict as `kept fork`, `took upstream`, or `adapted both`, with a one-line rationale.
+
 ## Pointers
 
 - `CONTRIBUTING.md`: fork workflow, branch model, release process, and customization surface.

@@ -2,4 +2,13 @@
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
+
+branch="$(git symbolic-ref --short HEAD 2>/dev/null || true)"
+case "$branch" in
+  sync/upstream-*)
+    echo "fork boundary: SKIP (upstream sync branch)"
+    exit 0
+    ;;
+esac
+
 "${repo_root}/scripts/check_fork_boundary.sh" --staged

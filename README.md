@@ -51,7 +51,15 @@ This fork restores the in-memory usage tracking that upstream removed in v6.10.0
 - `POST /v0/management/usage/import` — restore from a previous export
 - `GET /v0/management/request-log-by-id/:id` — fetch the per-request log file (used by the Request Event Detail modal)
 
-For external persistence beyond the in-memory store (e.g., SQLite, longer retention), [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper) is a standalone option that polls the management API.
+For external persistence beyond the in-memory store (e.g., SQLite, longer retention), these standalone options can consume the management API:
+
+### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
+
+Standalone usage persistence and visualization service for CLIProxyAPI. It periodically polls management API snapshots into SQLite, then serves aggregate APIs and dashboards.
+
+### [CLIProxyAPI Usage Dashboard](https://github.com/zhanglunet/cliproxyapi-usage-dashboard)
+
+Local-first usage and quota dashboard for CLIProxyAPI. It consumes the Redis-compatible usage queue into SQLite, visualizes daily and recent-window usage by account and model, and shows Codex 5h/7d quota remaining in a local web UI.
 
 ## Amp CLI Support
 
