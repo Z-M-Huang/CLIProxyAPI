@@ -19,7 +19,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -30,7 +29,6 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	clipexec "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/logging"
 	sdktr "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 )
 
@@ -202,11 +200,8 @@ func main() {
 		WithConfigPath("config.yaml").
 		WithCoreAuthManager(core).
 		WithServerOptions(
-			// Optional: add a simple middleware + custom request logger
+			// Optional: add a simple middleware.
 			api.WithMiddleware(func(c *gin.Context) { c.Header("X-Example", "custom-provider"); c.Next() }),
-			api.WithRequestLoggerFactory(func(cfg *config.Config, cfgPath string) logging.RequestLogger {
-				return logging.NewFileRequestLoggerWithOptions(true, "logs", filepath.Dir(cfgPath), cfg.ErrorLogsMaxFiles)
-			}),
 		).
 		WithHooks(hooks).
 		Build()

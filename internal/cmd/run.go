@@ -6,12 +6,18 @@ package cmd
 import (
 	"context"
 	"errors"
+	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usagepersist"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usagestore"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
 	log "github.com/sirupsen/logrus"
 )
@@ -25,10 +31,29 @@ import (
 //   - configPath: The path to the configuration file
 //   - localPassword: Optional password accepted for local management requests
 func StartService(cfg *config.Config, configPath string, localPassword string) {
+	store, errStore := openUsageStore(cfg, configPath)
+	if errStore != nil {
+		log.Errorf("failed to open usage database: %v", errStore)
+		return
+	}
+	usagepersist.SetStore(store)
+	defer func() {
+		usagepersist.SetStore(nil)
+		if errClose := store.Close(); errClose != nil {
+			log.Warnf("failed to close usage database: %v", errClose)
+		}
+	}()
+
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
-		WithLocalManagementPassword(localPassword)
+		WithLocalManagementPassword(localPassword).
+		WithServerOptions(
+			api.WithUsageStore(store),
+			api.WithRequestLoggerFactory(func(cfg *config.Config, _ string) logging.RequestLogger {
+				return logging.NewSQLiteRequestLogger(cfg.RequestLog, store)
+			}),
+		)
 
 	ctxSignal, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -58,10 +83,26 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 // StartServiceBackground starts the proxy service in a background goroutine
 // and returns a cancel function for shutdown and a done channel.
 func StartServiceBackground(cfg *config.Config, configPath string, localPassword string) (cancel func(), done <-chan struct{}) {
+	store, errStore := openUsageStore(cfg, configPath)
+	if errStore != nil {
+		log.Errorf("failed to open usage database: %v", errStore)
+		doneCh := make(chan struct{})
+		close(doneCh)
+		cancelFn := func() {}
+		return cancelFn, doneCh
+	}
+	usagepersist.SetStore(store)
+
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
-		WithLocalManagementPassword(localPassword)
+		WithLocalManagementPassword(localPassword).
+		WithServerOptions(
+			api.WithUsageStore(store),
+			api.WithRequestLoggerFactory(func(cfg *config.Config, _ string) logging.RequestLogger {
+				return logging.NewSQLiteRequestLogger(cfg.RequestLog, store)
+			}),
+		)
 
 	ctx, cancelFn := context.WithCancel(context.Background())
 	doneCh := make(chan struct{})
@@ -69,12 +110,22 @@ func StartServiceBackground(cfg *config.Config, configPath string, localPassword
 	service, err := builder.Build()
 	if err != nil {
 		log.Errorf("failed to build proxy service: %v", err)
+		usagepersist.SetStore(nil)
+		if errClose := store.Close(); errClose != nil {
+			log.Warnf("failed to close usage database: %v", errClose)
+		}
 		close(doneCh)
 		return cancelFn, doneCh
 	}
 
 	go func() {
 		defer close(doneCh)
+		defer func() {
+			usagepersist.SetStore(nil)
+			if errClose := store.Close(); errClose != nil {
+				log.Warnf("failed to close usage database: %v", errClose)
+			}
+		}()
 		if err := service.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Errorf("proxy service exited with error: %v", err)
 		}
@@ -95,4 +146,32 @@ func WaitForCloudDeploy() {
 	// Block until shutdown signal is received
 	<-ctxSignal.Done()
 	log.Info("Cloud deploy mode: Shutdown signal received; exiting")
+}
+
+func openUsageStore(cfg *config.Config, configPath string) (*usagestore.Store, error) {
+	path := usagestore.DefaultDatabasePath
+	if cfg != nil {
+		if configured := strings.TrimSpace(cfg.UsageDatabasePath); configured != "" {
+			path = configured
+		}
+	}
+	return usagestore.Open(resolveUsageDatabasePath(path, configPath))
+}
+
+func resolveUsageDatabasePath(path string, configPath string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		path = usagestore.DefaultDatabasePath
+	}
+	if filepath.IsAbs(path) {
+		return path
+	}
+	configDir := strings.TrimSpace(filepath.Dir(configPath))
+	if configDir != "" && configDir != "." {
+		return filepath.Join(configDir, path)
+	}
+	if wd, err := os.Getwd(); err == nil && wd != "" {
+		return filepath.Join(wd, path)
+	}
+	return path
 }

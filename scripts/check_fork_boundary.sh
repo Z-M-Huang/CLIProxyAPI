@@ -39,27 +39,61 @@ owned_paths=(
   "docs/ai-assistant-guidance.md"
   "internal/api/handlers/management/prompt_rules.go"
   "internal/api/handlers/management/prompt_rules_test.go"
+  "internal/logging/sqlite_request_logger.go"
   "internal/config/prompt_rules.go"
   "internal/config/prompt_rules_test.go"
   "internal/managementasset/fork_provider.go"
+  "internal/usagepersist/plugin.go"
+  "internal/usagestore/migrations.go"
+  "internal/usagestore/migrations/00001_create_usage_store.sql"
+  "internal/usagestore/store.go"
+  "internal/usagestore/store_test.go"
   "internal/runtime/executor/helps/prompt_rules.go"
   "internal/runtime/executor/helps/prompt_rules_test.go"
   "scripts/check_fork_boundary.sh"
 )
 
 patched_upstream_paths=(
+  ".gitignore"
   "cmd/server/main.go"
   "config.example.yaml"
+  "docker-compose.yml"
+  "examples/custom-provider/main.go"
+  "go.mod"
+  "go.sum"
+  "internal/api/handlers/management/handler.go"
   "internal/api/handlers/management/config_basic.go"
+  "internal/api/handlers/management/logs.go"
+  "internal/api/handlers/management/usage.go"
+  "internal/api/server.go"
+  "internal/api/server_test.go"
+  "internal/cmd/run.go"
   "internal/config/config.go"
   "internal/managementasset/updater.go"
+  "internal/usage/logger_plugin.go"
   "internal/tui/app.go"
+  "sdk/logging/request_logger.go"
 )
 
 patched_line_limit=50
 
 patched_line_limit_override() {
   case "$1" in
+    go.sum)
+      echo 200
+      ;;
+    internal/api/handlers/management/logs.go)
+      echo 250
+      ;;
+    internal/api/handlers/management/usage.go)
+      echo 300
+      ;;
+    internal/api/server_test.go)
+      echo 150
+      ;;
+    internal/cmd/run.go)
+      echo 150
+      ;;
     internal/config/config.go)
       echo 300
       ;;

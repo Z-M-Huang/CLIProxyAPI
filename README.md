@@ -44,18 +44,27 @@ see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
 
 ## Usage Statistics
 
-This fork restores the in-memory usage tracking that upstream removed in v6.10.0, with an added `request_id` field on each row for correlating to on-disk request logs. Stats surface in the management UI's Usage tab and via:
+This fork restores the usage tracking that upstream removed in v6.10.0 and persists it to SQLite. Each usage row includes `request_id` so the management UI can correlate usage events with persisted request histories.
 
 - `GET /v0/management/usage` — current snapshot
+- `GET /v0/management/usage/events` — paginated persisted events
 - `GET /v0/management/usage/export` — backup/migration
 - `POST /v0/management/usage/import` — restore from a previous export
-- `GET /v0/management/request-log-by-id/:id` — fetch the per-request log file (used by the Request Event Detail modal)
+- `GET /v0/management/request-log-by-id/:id` — fetch the persisted per-request history (used by the Request Event Detail modal)
 
-For external persistence beyond the in-memory store (e.g., SQLite, longer retention), these standalone options can consume the management API:
+Persistent storage is controlled by:
+
+- `usage-statistics-enabled` — captures usage events when true
+- `request-log` — captures full request/response histories to SQLite when true
+- `usage-database-path` — SQLite database path, default `./data/usage.sqlite`
+
+When using Docker Compose, `./data` is mounted to `/CLIProxyAPI/data` so the SQLite database survives container rebuilds and restarts.
+
+Application/runtime logs remain separate. `logging-to-file` still writes rotating application logs such as `main.log`; request histories are no longer written or served from request `.log` files.
 
 ### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
 
-Standalone usage persistence and visualization service for CLIProxyAPI. It periodically polls management API snapshots into SQLite, then serves aggregate APIs and dashboards.
+Standalone usage persistence and visualization service for CLIProxyAPI. This fork now integrates the same SQLite persistence idea directly into CPA, without requiring the separate Redis/RESP queue consumer.
 
 ### [CLIProxyAPI Usage Dashboard](https://github.com/zhanglunet/cliproxyapi-usage-dashboard)
 
