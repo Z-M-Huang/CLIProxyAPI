@@ -65,12 +65,17 @@ Conflicts during a sync are expected only in the customization surface below. **
 These are the files where the fork diverges from upstream. When syncing upstream, conflicts here are normal — keep our version. Everywhere else, take upstream's.
 
 - `Dockerfile` — currently aligned with upstream; reserved for future fork-specific bake steps.
+- `.gitignore` — ignores local persistent data files.
 - `docker-compose.yml` — registry default (`zhironghuang/cli-proxy-api`).
 - `docker-build.sh`, `docker-build.ps1` — local image tag.
 - `config.example.yaml` — `panel-github-repository` points at our fork.
 - `internal/config/config.go` — `DefaultPanelGitHubRepository`.
+- `go.mod`, `go.sum` — fork-only SQLite/goose dependencies for persistent usage history.
 - `internal/managementasset/updater.go` — `defaultManagementReleaseURL`; the upstream `cpamc.router-for.me` fallback is intentionally absent.
 - `internal/api/handlers/management/config_basic.go` — `latestReleaseURL` (the `/v0/management/latest-version` endpoint).
+- `internal/usagestore/**`, `internal/usagepersist/plugin.go`, `internal/logging/sqlite_request_logger.go` — persistent SQLite usage statistics and request history storage.
+- `internal/api/server.go`, `internal/cmd/run.go`, `internal/api/handlers/management/{handler,logs,usage}.go` — wires the SQLite usage store into the server and management API.
+- `internal/api/server_test.go`, `internal/usage/logger_plugin.go`, `sdk/logging/request_logger.go`, `examples/custom-provider/main.go` — compatibility adjustments for SQLite-only request histories.
 - `README.md`, `README_CN.md`, `README_JA.md` — fork notice block at the top; sponsor block replaced with an upstream pointer.
 - `AGENTS.md`, `CLAUDE.md`, `docs/ai-assistant-guidance.md` — shared assistant guidance and imports.
 - `.github/workflows/` — the fork keeps **no** GHA workflows. If upstream re-introduces any, re-delete them on sync.

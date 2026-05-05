@@ -95,8 +95,7 @@ type RequestDetail struct {
 	AuthIndex string     `json:"auth_index"`
 	Tokens    TokenStats `json:"tokens"`
 	Failed    bool       `json:"failed"`
-	// RequestID correlates this row with the on-disk request log file
-	// (request_logger.go writes filenames as `*-{requestID}.log`).
+	// RequestID correlates this row with the persisted request history.
 	// Resolved from ctx in Record(); empty when neither ctx nor the Gin
 	// context carry one (e.g. internal background callers).
 	RequestID string `json:"request_id,omitempty"`

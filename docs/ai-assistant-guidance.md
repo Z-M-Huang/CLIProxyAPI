@@ -113,18 +113,37 @@ Fork-owned files:
 - `internal/config/prompt_rules_test.go`
 - `internal/api/handlers/management/prompt_rules.go`
 - `internal/api/handlers/management/prompt_rules_test.go`
+- `internal/logging/sqlite_request_logger.go`
+- `internal/usagepersist/plugin.go`
+- `internal/usagestore/migrations.go`
+- `internal/usagestore/migrations/00001_create_usage_store.sql`
+- `internal/usagestore/store.go`
+- `internal/usagestore/store_test.go`
 - `internal/managementasset/fork_provider.go`
 - `internal/runtime/executor/helps/prompt_rules.go`
 - `internal/runtime/executor/helps/prompt_rules_test.go`
 
 Patched upstream files:
 
+- `.gitignore`
 - `cmd/server/main.go`
 - `config.example.yaml`
+- `docker-compose.yml`
+- `examples/custom-provider/main.go`
+- `go.mod`
+- `go.sum`
+- `internal/api/handlers/management/handler.go`
 - `internal/api/handlers/management/config_basic.go`
+- `internal/api/handlers/management/logs.go`
+- `internal/api/handlers/management/usage.go`
+- `internal/api/server.go`
+- `internal/api/server_test.go`
+- `internal/cmd/run.go`
 - `internal/config/config.go`
 - `internal/managementasset/updater.go`
+- `internal/usage/logger_plugin.go`
 - `internal/tui/app.go`
+- `sdk/logging/request_logger.go`
 
 Hard-fork triggers:
 
@@ -163,6 +182,7 @@ Current fork topics:
 - `prompt-rules`: fork-owned prompt-rule type and validation cluster extracted from `internal/config/config.go`.
 - `management-asset`: fork release feed and fallback asset wiring for `management.html`.
 - `releases`: `zmh-v*` tag namespace and fork repo links.
+- `usage-sqlite`: persistent SQLite/goose usage statistics and request histories; `request-log` writes request history to SQLite while `logging-to-file` remains application-log file output.
 
 ## Upstream Conflict Playbook
 

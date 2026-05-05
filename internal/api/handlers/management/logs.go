@@ -2,8 +2,10 @@ package management
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"math"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usagestore"
 )
 
 const (
@@ -148,7 +151,7 @@ func (h *Handler) DeleteLogs(c *gin.Context) {
 	})
 }
 
-// GetRequestErrorLogs lists error request log files when RequestLog is disabled.
+// GetRequestErrorLogs lists persisted error request histories when RequestLog is disabled.
 // It returns an empty list when RequestLog is enabled.
 func (h *Handler) GetRequestErrorLogs(c *gin.Context) {
 	if h == nil {
@@ -164,57 +167,22 @@ func (h *Handler) GetRequestErrorLogs(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"files": []any{}})
 		return
 	}
-
-	dir := h.logDirectory(cfg)
-	if strings.TrimSpace(dir) == "" {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
+	if h.usageStore == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "request history store unavailable"})
 		return
 	}
-
-	entries, err := os.ReadDir(dir)
+	files, err := h.usageStore.ListErrorRequestHistories(c.Request.Context())
 	if err != nil {
-		if os.IsNotExist(err) {
-			c.JSON(http.StatusOK, gin.H{"files": []any{}})
-			return
-		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to list request error logs: %v", err)})
 		return
 	}
-
-	type errorLog struct {
-		Name     string `json:"name"`
-		Size     int64  `json:"size"`
-		Modified int64  `json:"modified"`
+	if files == nil {
+		files = []usagestore.RequestHistoryFile{}
 	}
-
-	files := make([]errorLog, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if !strings.HasPrefix(name, "error-") || !strings.HasSuffix(name, ".log") {
-			continue
-		}
-		info, errInfo := entry.Info()
-		if errInfo != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log info for %s: %v", name, errInfo)})
-			return
-		}
-		files = append(files, errorLog{
-			Name:     name,
-			Size:     info.Size(),
-			Modified: info.ModTime().Unix(),
-		})
-	}
-
-	sort.Slice(files, func(i, j int) bool { return files[i].Modified > files[j].Modified })
-
 	c.JSON(http.StatusOK, gin.H{"files": files})
 }
 
-// GetRequestLogByID finds and downloads a request log file by its request ID.
-// The ID is matched against the suffix of log file names (format: *-{requestID}.log).
+// GetRequestLogByID downloads a persisted request history by request ID.
 func (h *Handler) GetRequestLogByID(c *gin.Context) {
 	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
@@ -223,12 +191,6 @@ func (h *Handler) GetRequestLogByID(c *gin.Context) {
 	cfg := h.cfg()
 	if cfg == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
-		return
-	}
-
-	dir := h.logDirectory(cfg)
-	if strings.TrimSpace(dir) == "" {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
 		return
 	}
 
@@ -244,65 +206,23 @@ func (h *Handler) GetRequestLogByID(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request ID"})
 		return
 	}
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "log directory not found"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to list log directory: %v", err)})
+	if h.usageStore == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "request history store unavailable"})
 		return
 	}
-
-	suffix := "-" + requestID + ".log"
-	var matchedFile string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if strings.HasSuffix(name, suffix) {
-			matchedFile = name
-			break
-		}
-	}
-
-	if matchedFile == "" {
-		c.JSON(http.StatusNotFound, gin.H{"error": "log file not found for the given request ID"})
+	history, err := h.usageStore.RequestHistoryByID(c.Request.Context(), requestID)
+	if err == nil {
+		writeRequestHistoryAttachment(c, history)
 		return
 	}
-
-	dirAbs, errAbs := filepath.Abs(dir)
-	if errAbs != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to resolve log directory: %v", errAbs)})
+	if errors.Is(err, os.ErrNotExist) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "request history not found for the given request ID"})
 		return
 	}
-	fullPath := filepath.Clean(filepath.Join(dirAbs, matchedFile))
-	prefix := dirAbs + string(os.PathSeparator)
-	if !strings.HasPrefix(fullPath, prefix) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file path"})
-		return
-	}
-
-	info, errStat := os.Stat(fullPath)
-	if errStat != nil {
-		if os.IsNotExist(errStat) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "log file not found"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file: %v", errStat)})
-		return
-	}
-	if info.IsDir() {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file"})
-		return
-	}
-
-	c.FileAttachment(fullPath, matchedFile)
+	c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read request history: %v", err)})
 }
 
-// DownloadRequestErrorLog downloads a specific error request log file by name.
+// DownloadRequestErrorLog downloads a specific persisted error request history by name.
 func (h *Handler) DownloadRequestErrorLog(c *gin.Context) {
 	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
@@ -314,49 +234,41 @@ func (h *Handler) DownloadRequestErrorLog(c *gin.Context) {
 		return
 	}
 
-	dir := h.logDirectory(cfg)
-	if strings.TrimSpace(dir) == "" {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
-		return
-	}
-
 	name := strings.TrimSpace(c.Param("name"))
 	if name == "" || strings.Contains(name, "/") || strings.Contains(name, "\\") {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file name"})
 		return
 	}
 	if !strings.HasPrefix(name, "error-") || !strings.HasSuffix(name, ".log") {
-		c.JSON(http.StatusNotFound, gin.H{"error": "log file not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "request history not found"})
 		return
 	}
+	if h.usageStore == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "request history store unavailable"})
+		return
+	}
+	history, err := h.usageStore.RequestHistoryByLogName(c.Request.Context(), name)
+	if err == nil {
+		writeRequestHistoryAttachment(c, history)
+		return
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "request history not found"})
+		return
+	}
+	c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read request history: %v", err)})
+}
 
-	dirAbs, errAbs := filepath.Abs(dir)
-	if errAbs != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to resolve log directory: %v", errAbs)})
-		return
+func writeRequestHistoryAttachment(c *gin.Context, history usagestore.RequestHistory) {
+	name := strings.TrimSpace(history.LogName)
+	if name == "" {
+		name = "request-" + strings.TrimSpace(history.RequestID) + ".log"
 	}
-	fullPath := filepath.Clean(filepath.Join(dirAbs, name))
-	prefix := dirAbs + string(os.PathSeparator)
-	if !strings.HasPrefix(fullPath, prefix) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file path"})
-		return
+	if name == "request-.log" {
+		name = "request.log"
 	}
-
-	info, errStat := os.Stat(fullPath)
-	if errStat != nil {
-		if os.IsNotExist(errStat) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "log file not found"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file: %v", errStat)})
-		return
-	}
-	if info.IsDir() {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file"})
-		return
-	}
-
-	c.FileAttachment(fullPath, name)
+	c.Header("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": name}))
+	c.Data(http.StatusOK, "text/plain; charset=utf-8", history.LogText)
 }
 
 // logDirectory returns the configured log directory using the supplied
