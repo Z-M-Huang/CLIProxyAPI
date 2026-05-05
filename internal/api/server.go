@@ -13,7 +13,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -32,6 +31,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usagestore"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
@@ -57,16 +57,11 @@ type serverOptionConfig struct {
 	keepAliveTimeout     time.Duration
 	keepAliveOnTimeout   func()
 	postAuthHook         auth.PostAuthHook
+	usageStore           *usagestore.Store
 }
 
 // ServerOption customises HTTP server construction.
 type ServerOption func(*serverOptionConfig)
-
-func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.RequestLogger {
-	configDir := filepath.Dir(configPath)
-	logsDir := logging.ResolveLogDirectory(cfg)
-	return logging.NewFileRequestLogger(cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles)
-}
 
 // WithMiddleware appends additional Gin middleware during server construction.
 func WithMiddleware(mw ...gin.HandlerFunc) ServerOption {
@@ -112,6 +107,13 @@ func WithKeepAliveEndpoint(timeout time.Duration, onTimeout func()) ServerOption
 func WithRequestLoggerFactory(factory func(*config.Config, string) logging.RequestLogger) ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.requestLoggerFactory = factory
+	}
+}
+
+// WithUsageStore provides the persistent usage/request-history store for management APIs.
+func WithUsageStore(store *usagestore.Store) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.usageStore = store
 	}
 }
 
@@ -164,6 +166,7 @@ type Server struct {
 	// requestLogger is the request logger instance for dynamic configuration updates.
 	requestLogger logging.RequestLogger
 	loggerToggle  func(bool)
+	usageStore    *usagestore.Store
 
 	// configFilePath is the absolute path to the YAML config file for persistence.
 	configFilePath string
@@ -211,9 +214,7 @@ type Server struct {
 // Returns:
 //   - *Server: A new server instance
 func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdkaccess.Manager, configFilePath string, opts ...ServerOption) *Server {
-	optionState := &serverOptionConfig{
-		requestLoggerFactory: defaultRequestLoggerFactory,
-	}
+	optionState := &serverOptionConfig{}
 	for i := range opts {
 		opts[i](optionState)
 	}
@@ -268,6 +269,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		accessManager:       accessManager,
 		requestLogger:       requestLogger,
 		loggerToggle:        toggle,
+		usageStore:          optionState.usageStore,
 		configFilePath:      configFilePath,
 		currentPath:         wd,
 		envManagementSecret: envManagementSecret,
@@ -292,6 +294,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.mgmt.SetConfigCommitter(func(next *config.Config) {
 		s.UpdateClients(next)
 	})
+	s.mgmt.SetUsageStore(optionState.usageStore)
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
 	}
@@ -525,6 +528,9 @@ func (s *Server) registerManagementRoutes() {
 	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
 	{
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
+		mgmt.GET("/usage/overview", s.mgmt.GetUsageOverview)
+		mgmt.GET("/usage/events", s.mgmt.GetUsageEvents)
+		mgmt.GET("/usage/events/filters", s.mgmt.GetUsageEventFilters)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
 		mgmt.GET("/config", s.mgmt.GetConfig)
