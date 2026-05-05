@@ -50,7 +50,15 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 - `POST /v0/management/usage/import` — 从导出快照恢复
 - `GET /v0/management/request-log-by-id/:id` — 获取逐请求日志文件（被"请求事件详情"模态框使用）
 
-如需在内存存储之外进行外部持久化（如 SQLite、更长保留期），可选用 [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)，它通过轮询管理 API 实现。
+如需在内存存储之外进行外部持久化（如 SQLite、更长保留期），可选用这些独立项目来消费管理 API：
+
+### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
+
+独立的 CLIProxyAPI 使用量持久化与可视化服务。它定期轮询管理 API 快照并写入 SQLite，随后提供聚合 API 与看板。
+
+### [CLIProxyAPI Usage Dashboard](https://github.com/zhanglunet/cliproxyapi-usage-dashboard)
+
+面向 CLIProxyAPI 的本地优先使用量与配额看板。它从 Redis 兼容使用量队列采集请求用量并写入 SQLite，按账号和模型可视化每日及最近时间窗口的用量，并在本地网页中显示 Codex 5h/7d 配额余量。
 
 ## Amp CLI 支持
 

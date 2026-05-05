@@ -51,7 +51,15 @@ CLIProxyAPIガイド：[https://help.router-for.me/](https://help.router-for.me/
 - `POST /v0/management/usage/import` — エクスポートからの復元
 - `GET /v0/management/request-log-by-id/:id` — リクエスト単位のログファイル取得（「リクエストイベント詳細」モーダルが使用）
 
-インメモリ以外の永続化（SQLite やより長期の保持など）が必要な場合は、管理 API をポーリングするスタンドアロンの [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper) が選択肢になります。
+インメモリ以外の永続化（SQLite やより長期の保持など）が必要な場合は、管理 API を利用する次のスタンドアロンプロジェクトが選択肢になります。
+
+### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
+
+CLIProxyAPI 向けの独立した使用量永続化・可視化サービス。管理 API のスナップショットを定期的に SQLite へ取り込み、集計 API とダッシュボードを提供します。
+
+### [CLIProxyAPI Usage Dashboard](https://github.com/zhanglunet/cliproxyapi-usage-dashboard)
+
+CLIProxyAPI 向けのローカル優先の使用量・クォータダッシュボード。Redis 互換の使用量キューからリクエスト使用量を SQLite に保存し、アカウント別・モデル別の日次および直近時間枠の使用量を可視化し、Codex 5h/7d クォータ残量をローカル Web UI で表示します。
 
 ## Amp CLIサポート
 

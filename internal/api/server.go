@@ -572,6 +572,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/api-keys", s.mgmt.PatchAPIKeys)
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
 		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyUsage)
+		mgmt.GET("/usage-queue", s.mgmt.GetUsageQueue)
 
 		mgmt.GET("/prompt-rules", s.mgmt.GetPromptRules)
 		mgmt.PUT("/prompt-rules", s.mgmt.PutPromptRules)

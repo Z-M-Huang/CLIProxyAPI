@@ -573,7 +573,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 		return nil, nil, errMsg
 	}
 	reqMeta := requestExecutionMetadata(ctx)
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
 	// Apply pre-translation prompt rules (inject/strip on system + last user
 	// natural-language message) before any executor sees the request body.
 	// OriginalRequest stays the un-mutated rawJSON so payload-rule semantics
@@ -628,7 +628,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 		return nil, nil, errMsg
 	}
 	reqMeta := requestExecutionMetadata(ctx)
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
 	// Apply pre-translation prompt rules (inject/strip on system + last user
 	// natural-language message) before any executor sees the request body.
 	// OriginalRequest stays the un-mutated rawJSON so payload-rule semantics
@@ -687,7 +687,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		return nil, nil, errChan
 	}
 	reqMeta := requestExecutionMetadata(ctx)
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
 	// Apply pre-translation prompt rules (inject/strip on system + last user
 	// natural-language message) before any executor sees the request body.
 	// OriginalRequest stays the un-mutated rawJSON so payload-rule semantics
