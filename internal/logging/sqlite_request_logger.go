@@ -8,14 +8,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usagestore"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usagestore"
 	log "github.com/sirupsen/logrus"
 )
 
 type SQLiteRequestLogger struct {
-	enabled atomic.Bool
-	store   *usagestore.Store
+	enabled     atomic.Bool
+	homeEnabled atomic.Bool
+	store       *usagestore.Store
 
 	mu      sync.Mutex
 	closed  bool
@@ -51,6 +52,12 @@ func (l *SQLiteRequestLogger) IsEnabled() bool {
 func (l *SQLiteRequestLogger) SetEnabled(enabled bool) {
 	if l != nil {
 		l.enabled.Store(enabled)
+	}
+}
+
+func (l *SQLiteRequestLogger) SetHomeEnabled(enabled bool) {
+	if l != nil {
+		l.homeEnabled.Store(enabled)
 	}
 }
 
@@ -192,7 +199,8 @@ func (l *SQLiteRequestLogger) writeLogRequest(args asyncLogArgs, force bool) err
 	if force {
 		logName = "error-" + logName
 	}
-	return l.store.InsertRequestHistory(context.Background(), usagestore.RequestHistory{
+	logText := buf.Bytes()
+	if errStore := l.store.InsertRequestHistory(context.Background(), usagestore.RequestHistory{
 		RequestID:            args.requestID,
 		LogName:              logName,
 		URL:                  args.url,
@@ -201,8 +209,17 @@ func (l *SQLiteRequestLogger) writeLogRequest(args asyncLogArgs, force bool) err
 		Force:                force,
 		RequestTimestamp:     args.requestTimestamp,
 		APIResponseTimestamp: args.apiResponseTimestamp,
-		LogText:              buf.Bytes(),
-	})
+		LogText:              logText,
+	}); errStore != nil {
+		return errStore
+	}
+
+	if l.homeEnabled.Load() && !force {
+		if errHome := forwardRequestLogPayloadToHome(context.Background(), args.requestHeaders, string(logText)); errHome != nil {
+			return fmt.Errorf("forward request history to home: %w", errHome)
+		}
+	}
+	return nil
 }
 
 type SQLiteStreamingLogWriter struct {

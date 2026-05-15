@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	proxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	proxyconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
 // TestServer_ConfigHotReload_NoRaceUnderConcurrentReads pins the

@@ -31,11 +31,13 @@ type Store struct {
 }
 
 type TokenStats struct {
-	InputTokens     int64 `json:"input_tokens"`
-	OutputTokens    int64 `json:"output_tokens"`
-	ReasoningTokens int64 `json:"reasoning_tokens"`
-	CachedTokens    int64 `json:"cached_tokens"`
-	TotalTokens     int64 `json:"total_tokens"`
+	InputTokens         int64 `json:"input_tokens"`
+	OutputTokens        int64 `json:"output_tokens"`
+	ReasoningTokens     int64 `json:"reasoning_tokens"`
+	CachedTokens        int64 `json:"cached_tokens"`
+	CacheReadTokens     int64 `json:"cache_read_tokens"`
+	CacheCreationTokens int64 `json:"cache_creation_tokens"`
+	TotalTokens         int64 `json:"total_tokens"`
 }
 
 type UsageEvent struct {
@@ -224,8 +226,8 @@ func (s *Store) InsertUsageEvent(ctx context.Context, event UsageEvent) (bool, e
 	result, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO usage_events (
 		event_key, api_group_key, provider, endpoint, auth_type, request_id, model, timestamp,
 		source, auth_index, failed, latency_ms, input_tokens, output_tokens, reasoning_tokens,
-		cached_tokens, total_tokens, created_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		cached_tokens, cache_read_tokens, cache_creation_tokens, total_tokens, created_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.EventKey,
 		event.APIGroupKey,
 		event.Provider,
@@ -242,6 +244,8 @@ func (s *Store) InsertUsageEvent(ctx context.Context, event UsageEvent) (bool, e
 		event.Tokens.OutputTokens,
 		event.Tokens.ReasoningTokens,
 		event.Tokens.CachedTokens,
+		event.Tokens.CacheReadTokens,
+		event.Tokens.CacheCreationTokens,
 		event.Tokens.TotalTokens,
 		formatTime(time.Now().UTC()),
 	)
@@ -295,7 +299,7 @@ func (s *Store) BuildSnapshot(ctx context.Context) (StatisticsSnapshot, error) {
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id, event_key, api_group_key, provider, endpoint, auth_type, request_id,
 		model, timestamp, source, auth_index, failed, latency_ms, input_tokens, output_tokens,
-		reasoning_tokens, cached_tokens, total_tokens
+		reasoning_tokens, cached_tokens, cache_read_tokens, cache_creation_tokens, total_tokens
 		FROM usage_events ORDER BY timestamp ASC, id ASC`)
 	if err != nil {
 		return snapshot, fmt.Errorf("usage store: query usage events: %w", err)
@@ -338,7 +342,7 @@ func (s *Store) ListUsageEvents(ctx context.Context, filter UsageEventsFilter) (
 	queryArgs = append(queryArgs, pageSize, (page-1)*pageSize)
 	rows, err := s.db.QueryContext(ctx, `SELECT id, event_key, api_group_key, provider, endpoint, auth_type, request_id,
 		model, timestamp, source, auth_index, failed, latency_ms, input_tokens, output_tokens,
-		reasoning_tokens, cached_tokens, total_tokens
+		reasoning_tokens, cached_tokens, cache_read_tokens, cache_creation_tokens, total_tokens
 		FROM usage_events`+where+` ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
 		return UsageEventsPage{}, fmt.Errorf("usage store: list usage events: %w", err)
@@ -555,7 +559,7 @@ func NormalizeTokenStats(tokens TokenStats) TokenStats {
 func BuildEventKey(event UsageEvent) string {
 	tokens := NormalizeTokenStats(event.Tokens)
 	payload := fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
+		"%s|%s|%s|%s|%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d|%d|%d",
 		strings.TrimSpace(event.APIGroupKey),
 		strings.TrimSpace(event.Provider),
 		strings.TrimSpace(event.Endpoint),
@@ -570,6 +574,8 @@ func BuildEventKey(event UsageEvent) string {
 		tokens.OutputTokens,
 		tokens.ReasoningTokens,
 		tokens.CachedTokens,
+		tokens.CacheReadTokens,
+		tokens.CacheCreationTokens,
 		tokens.TotalTokens,
 	)
 	sum := sha256.Sum256([]byte(payload))
@@ -617,6 +623,8 @@ func scanUsageEvent(rows interface {
 		&event.Tokens.OutputTokens,
 		&event.Tokens.ReasoningTokens,
 		&event.Tokens.CachedTokens,
+		&event.Tokens.CacheReadTokens,
+		&event.Tokens.CacheCreationTokens,
 		&event.Tokens.TotalTokens,
 	); err != nil {
 		return scannedUsageEvent{}, fmt.Errorf("usage store: scan usage event: %w", err)

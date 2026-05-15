@@ -13,12 +13,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usagepersist"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usagestore"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usagepersist"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usagestore"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 	log "github.com/sirupsen/logrus"
 )
 

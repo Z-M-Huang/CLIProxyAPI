@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 )
 
 // Default queue capacities. Sized for typical request rates: at ~200 req/s

@@ -29,8 +29,10 @@ func TestStorePersistsUsageEventsAndRequestHistory(t *testing.T) {
 		AuthIndex:   "claude-1",
 		LatencyMS:   250,
 		Tokens: TokenStats{
-			InputTokens:  10,
-			OutputTokens: 20,
+			InputTokens:         10,
+			OutputTokens:        20,
+			CacheReadTokens:     3,
+			CacheCreationTokens: 4,
 		},
 	}
 	inserted, err := store.InsertUsageEvent(ctx, event)
@@ -40,7 +42,7 @@ func TestStorePersistsUsageEventsAndRequestHistory(t *testing.T) {
 	if !inserted {
 		t.Fatal("InsertUsageEvent() inserted = false, want true")
 	}
-	assertMigrationVersion(t, store, 1)
+	assertMigrationVersion(t, store, 2)
 
 	inserted, err = store.InsertUsageEvent(ctx, event)
 	if err != nil {
@@ -70,7 +72,7 @@ func TestStorePersistsUsageEventsAndRequestHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen Open() error = %v", err)
 	}
-	assertMigrationVersion(t, store, 1)
+	assertMigrationVersion(t, store, 2)
 	defer func() {
 		if errClose := store.Close(); errClose != nil {
 			t.Fatalf("Close() error = %v", errClose)
@@ -95,6 +97,9 @@ func TestStorePersistsUsageEventsAndRequestHistory(t *testing.T) {
 	if len(modelSnapshot.Details) != 1 || modelSnapshot.Details[0].RequestID != "req-1" {
 		t.Fatalf("BuildSnapshot() details = %#v, want req-1 detail", modelSnapshot.Details)
 	}
+	if modelSnapshot.Details[0].Tokens.CacheReadTokens != 3 || modelSnapshot.Details[0].Tokens.CacheCreationTokens != 4 {
+		t.Fatalf("BuildSnapshot() cache tokens = %+v, want read=3 creation=4", modelSnapshot.Details[0].Tokens)
+	}
 
 	page, err := store.ListUsageEvents(ctx, UsageEventsFilter{Page: 1, PageSize: 10})
 	if err != nil {
@@ -102,6 +107,9 @@ func TestStorePersistsUsageEventsAndRequestHistory(t *testing.T) {
 	}
 	if page.TotalCount != 1 || len(page.Events) != 1 {
 		t.Fatalf("ListUsageEvents() total=%d len=%d, want 1/1", page.TotalCount, len(page.Events))
+	}
+	if page.Events[0].Tokens.CacheReadTokens != 3 || page.Events[0].Tokens.CacheCreationTokens != 4 {
+		t.Fatalf("ListUsageEvents() cache tokens = %+v, want read=3 creation=4", page.Events[0].Tokens)
 	}
 
 	history, err := store.RequestHistoryByID(ctx, "req-1")

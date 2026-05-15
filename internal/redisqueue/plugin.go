@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
 func init() {
@@ -50,11 +50,13 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	requestID := strings.TrimSpace(internallogging.GetRequestID(ctx))
 
 	tokens := internalusage.TokenStats{
-		InputTokens:     record.Detail.InputTokens,
-		OutputTokens:    record.Detail.OutputTokens,
-		ReasoningTokens: record.Detail.ReasoningTokens,
-		CachedTokens:    record.Detail.CachedTokens,
-		TotalTokens:     record.Detail.TotalTokens,
+		InputTokens:         record.Detail.InputTokens,
+		OutputTokens:        record.Detail.OutputTokens,
+		ReasoningTokens:     record.Detail.ReasoningTokens,
+		CachedTokens:        record.Detail.CachedTokens,
+		CacheReadTokens:     record.Detail.CacheReadTokens,
+		CacheCreationTokens: record.Detail.CacheCreationTokens,
+		TotalTokens:         record.Detail.TotalTokens,
 	}
 	if tokens.TotalTokens == 0 {
 		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens
@@ -67,18 +69,20 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	if !failed {
 		failed = !resolveSuccess(ctx)
 	}
+	fail := resolveFail(ctx, record, failed)
 
-	detail := internalusage.RequestDetail{
+	detail := requestDetail{
 		Timestamp: timestamp,
 		LatencyMs: record.Latency.Milliseconds(),
 		Source:    record.Source,
 		AuthIndex: record.AuthIndex,
 		Tokens:    tokens,
 		Failed:    failed,
+		Fail:      fail,
 	}
 
 	payload, err := json.Marshal(queuedUsageDetail{
-		RequestDetail: detail,
+		requestDetail: detail,
 		Provider:      provider,
 		Model:         modelName,
 		Alias:         aliasName,
@@ -94,7 +98,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 }
 
 type queuedUsageDetail struct {
-	internalusage.RequestDetail
+	requestDetail
 	Provider  string `json:"provider"`
 	Model     string `json:"model"`
 	Alias     string `json:"alias"`
@@ -102,6 +106,38 @@ type queuedUsageDetail struct {
 	AuthType  string `json:"auth_type"`
 	APIKey    string `json:"api_key"`
 	RequestID string `json:"request_id"`
+}
+
+type requestDetail struct {
+	Timestamp time.Time                `json:"timestamp"`
+	LatencyMs int64                    `json:"latency_ms"`
+	Source    string                   `json:"source"`
+	AuthIndex string                   `json:"auth_index"`
+	Tokens    internalusage.TokenStats `json:"tokens"`
+	Failed    bool                     `json:"failed"`
+	Fail      failDetail               `json:"fail"`
+}
+
+type failDetail struct {
+	StatusCode int    `json:"status_code"`
+	Body       string `json:"body"`
+}
+
+func resolveFail(ctx context.Context, record coreusage.Record, failed bool) failDetail {
+	fail := failDetail{
+		StatusCode: record.Fail.StatusCode,
+		Body:       strings.TrimSpace(record.Fail.Body),
+	}
+	if !failed {
+		return failDetail{StatusCode: 200}
+	}
+	if fail.StatusCode <= 0 {
+		fail.StatusCode = internallogging.GetResponseStatus(ctx)
+	}
+	if fail.StatusCode <= 0 {
+		fail.StatusCode = 500
+	}
+	return fail
 }
 
 func resolveSuccess(ctx context.Context) bool {
