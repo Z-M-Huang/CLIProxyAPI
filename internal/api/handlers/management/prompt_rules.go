@@ -164,10 +164,9 @@ func (h *Handler) applyPromptRulesAndPersist(c *gin.Context, next []config.Promp
 		return
 	}
 
+	h.cfgValue = clone
 	h.cfgPtr.Store(clone)
-	if commit := h.loadCommit(); commit != nil {
-		commit(clone)
-	}
+	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), clone)
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 

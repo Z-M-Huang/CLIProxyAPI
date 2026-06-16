@@ -240,7 +240,7 @@ func TestPromptRules_API_PutEmptyBodyClears(t *testing.T) {
 
 // TestPromptRules_API_Put_RollbackOnPersistFailure regression-guards the
 // prompt-rules write path: applyPromptRulesAndPersist must restore both
-// h.cfg.PromptRules and the runtime snapshot if persistLocked fails to write
+// h.cfg().PromptRules and the runtime snapshot if persistLocked fails to write
 // config.yaml, otherwise the API returns 500 but live requests are rewritten
 // by rules that were never saved
 // (Codex review pull/3178#pullrequestreview-4210925408).

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/httpfetch"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	log "github.com/sirupsen/logrus"
@@ -44,30 +45,11 @@ var (
 	schedulerOnce       sync.Once
 	schedulerConfigPath atomic.Value
 	sfGroup             singleflight.Group
-
-	// activeReleaseURLProvider is the currently-registered release URL
-	// provider. The default impl returns the upstream constants verbatim,
-	// keeping behavior identical to pre-seam code. Forks can override at
-	// init time via SetReleaseURLProvider to point the auto-updater at a
-	// different release artifact location without modifying this file.
-	//
-	// Wrapped in a *providerHolder so atomic.Value sees the same concrete
-	// type on every Store (atomic.Value rejects type-inconsistent Stores).
-	activeReleaseURLProvider atomic.Value // *providerHolder
+	releaseProvider     atomic.Value
 )
 
-// ReleaseURLProvider supplies the GitHub releases endpoint and the unverified
-// fallback URL used by the management-asset auto-updater. The default impl
-// returns the upstream router-for-me URLs unchanged. Forks register a custom
-// impl during init to point the auto-updater at a different artifact.
 type ReleaseURLProvider interface {
-	// ReleaseURL returns the GitHub /releases/latest endpoint that fetches
-	// the management-asset release metadata when no per-config repository
-	// override is supplied.
 	ReleaseURL() string
-	// FallbackURL returns the URL the auto-updater downloads from when the
-	// release-metadata path fails. The fallback is fetched without digest
-	// verification, so callers should rate-limit and log loudly.
 	FallbackURL() string
 }
 
@@ -76,31 +58,28 @@ type defaultReleaseURLProvider struct{}
 func (defaultReleaseURLProvider) ReleaseURL() string  { return defaultManagementReleaseURL }
 func (defaultReleaseURLProvider) FallbackURL() string { return defaultManagementFallbackURL }
 
-// providerHolder pins atomic.Value to a single concrete type while still
-// letting the wrapped interface vary across Stores.
-type providerHolder struct {
-	p ReleaseURLProvider
+type releaseProviderHolder struct {
+	provider ReleaseURLProvider
 }
 
 func init() {
-	activeReleaseURLProvider.Store(&providerHolder{p: defaultReleaseURLProvider{}})
+	releaseProvider.Store(&releaseProviderHolder{provider: defaultReleaseURLProvider{}})
 }
 
-// SetReleaseURLProvider registers p as the active release URL provider. Pass
-// nil to restore the upstream defaults. Safe to call from package init.
-func SetReleaseURLProvider(p ReleaseURLProvider) {
-	if p == nil {
-		activeReleaseURLProvider.Store(&providerHolder{p: defaultReleaseURLProvider{}})
+func SetReleaseURLProvider(provider ReleaseURLProvider) {
+	if provider == nil {
+		releaseProvider.Store(&releaseProviderHolder{provider: defaultReleaseURLProvider{}})
 		return
 	}
-	activeReleaseURLProvider.Store(&providerHolder{p: p})
+	releaseProvider.Store(&releaseProviderHolder{provider: provider})
 }
 
 func currentReleaseURLProvider() ReleaseURLProvider {
-	if h, ok := activeReleaseURLProvider.Load().(*providerHolder); ok && h != nil && h.p != nil {
-		return h.p
+	holder, _ := releaseProvider.Load().(*releaseProviderHolder)
+	if holder == nil || holder.provider == nil {
+		return defaultReleaseURLProvider{}
 	}
-	return defaultReleaseURLProvider{}
+	return holder.provider
 }
 
 func currentReleaseURL() string {
@@ -152,16 +131,8 @@ func runAutoUpdater(ctx context.Context) {
 
 	runOnce := func() {
 		cfg := currentConfigPtr.Load()
-		if cfg == nil {
-			log.Debug("management asset auto-updater skipped: config not yet available")
-			return
-		}
-		if cfg.RemoteManagement.DisableControlPanel {
-			log.Debug("management asset auto-updater skipped: control panel disabled")
-			return
-		}
-		if cfg.RemoteManagement.DisableAutoUpdatePanel {
-			log.Debug("management asset auto-updater skipped: disable-auto-update-panel is enabled")
+		if reason, skip := autoUpdateSkipReason(cfg); skip {
+			log.Debugf("management asset auto-updater skipped: %s", reason)
 			return
 		}
 
@@ -180,6 +151,22 @@ func runAutoUpdater(ctx context.Context) {
 			runOnce()
 		}
 	}
+}
+
+func autoUpdateSkipReason(cfg *config.Config) (string, bool) {
+	if cfg == nil {
+		return "config not yet available", true
+	}
+	if cfg.Home.Enabled {
+		return "cluster mode enabled", true
+	}
+	if cfg.RemoteManagement.DisableControlPanel {
+		return "control panel disabled", true
+	}
+	if cfg.RemoteManagement.DisableAutoUpdatePanel {
+		return "disable-auto-update-panel is enabled", true
+	}
+	return "", false
 }
 
 func newHTTPClient(proxyURL string) *http.Client {
@@ -305,11 +292,11 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 
 		asset, remoteHash, err := fetchLatestAsset(ctx, client, releaseURL)
 		if err != nil {
-			// No fork-operated fallback URL — if the GitHub fetch fails we
-			// leave any existing local asset in place. localFileMissing here
-			// means /management.html will 404 until the next tick succeeds.
 			if localFileMissing {
-				log.WithError(err).Warn("failed to fetch latest management release information; no local asset to serve")
+				log.WithError(err).Warn("failed to fetch latest management release information, trying fallback page")
+				if ensureFallbackManagementHTML(ctx, client, localPath) {
+					return nil, nil
+				}
 				return nil, nil
 			}
 			log.WithError(err).Warn("failed to fetch latest management release information")
@@ -323,6 +310,13 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 
 		data, downloadedHash, err := downloadAsset(ctx, client, asset.BrowserDownloadURL)
 		if err != nil {
+			if localFileMissing {
+				log.WithError(err).Warn("failed to download management asset, trying fallback page")
+				if ensureFallbackManagementHTML(ctx, client, localPath) {
+					return nil, nil
+				}
+				return nil, nil
+			}
 			log.WithError(err).Warn("failed to download management asset")
 			return nil, nil
 		}
@@ -363,16 +357,16 @@ func ensureFallbackManagementHTML(ctx context.Context, client *http.Client, loca
 	log.Infof("management asset updated from fallback page successfully (hash=%s)", downloadedHash)
 	return true
 }
+
 func resolveReleaseURL(repo string) string {
 	repo = strings.TrimSpace(repo)
-	defaultURL := currentReleaseURL()
 	if repo == "" {
-		return defaultURL
+		return currentReleaseURL()
 	}
 
 	parsed, err := url.Parse(repo)
 	if err != nil || parsed.Host == "" {
-		return defaultURL
+		return currentReleaseURL()
 	}
 
 	host := strings.ToLower(parsed.Host)
@@ -393,7 +387,7 @@ func resolveReleaseURL(repo string) string {
 		}
 	}
 
-	return defaultURL
+	return currentReleaseURL()
 }
 
 func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL string) (*releaseAsset, string, error) {
@@ -401,32 +395,22 @@ func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL strin
 		releaseURL = currentReleaseURL()
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, releaseURL, nil)
-	if err != nil {
-		return nil, "", fmt.Errorf("create release request: %w", err)
+	headers := map[string]string{
+		"Accept":     "application/vnd.github+json",
+		"User-Agent": httpUserAgent,
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", httpUserAgent)
 	gitURL := strings.ToLower(strings.TrimSpace(os.Getenv("GITSTORE_GIT_URL")))
 	if tok := strings.TrimSpace(os.Getenv("GITSTORE_GIT_TOKEN")); tok != "" && strings.Contains(gitURL, "github.com") {
-		req.Header.Set("Authorization", "Bearer "+tok)
+		headers["Authorization"] = "Bearer " + tok
 	}
 
-	resp, err := client.Do(req)
+	data, err := httpfetch.GetBytes(ctx, client, releaseURL, headers, 0)
 	if err != nil {
-		return nil, "", fmt.Errorf("execute release request: %w", err)
-	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, "", fmt.Errorf("unexpected release status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, "", fmt.Errorf("fetch release: %w", err)
 	}
 
 	var release releaseResponse
-	if err = json.NewDecoder(resp.Body).Decode(&release); err != nil {
+	if err = json.Unmarshal(data, &release); err != nil {
 		return nil, "", fmt.Errorf("decode release response: %w", err)
 	}
 
@@ -446,31 +430,9 @@ func downloadAsset(ctx context.Context, client *http.Client, downloadURL string)
 		return nil, "", fmt.Errorf("empty download url")
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
+	data, err := httpfetch.GetBytes(ctx, client, downloadURL, map[string]string{"User-Agent": httpUserAgent}, maxAssetDownloadSize)
 	if err != nil {
-		return nil, "", fmt.Errorf("create download request: %w", err)
-	}
-	req.Header.Set("User-Agent", httpUserAgent)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, "", fmt.Errorf("execute download request: %w", err)
-	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, "", fmt.Errorf("unexpected download status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxAssetDownloadSize+1))
-	if err != nil {
-		return nil, "", fmt.Errorf("read download body: %w", err)
-	}
-	if int64(len(data)) > maxAssetDownloadSize {
-		return nil, "", fmt.Errorf("download exceeds maximum allowed size of %d bytes", maxAssetDownloadSize)
+		return nil, "", fmt.Errorf("download asset: %w", err)
 	}
 
 	sum := sha256.Sum256(data)
