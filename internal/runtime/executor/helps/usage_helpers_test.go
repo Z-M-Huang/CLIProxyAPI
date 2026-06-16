@@ -2,12 +2,12 @@ package helps
 
 import (
 	"context"
-	"net/http/httptest"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
@@ -89,6 +89,40 @@ func TestParseOpenAIStreamUsageResponsesFields(t *testing.T) {
 	}
 }
 
+func TestParseClaudeUsageIncludesCacheTokensInTotal(t *testing.T) {
+	data := []byte(`{"usage":{"input_tokens":3085,"output_tokens":253,"cache_read_input_tokens":7,"cache_creation_input_tokens":19514}}`)
+	detail := ParseClaudeUsage(data)
+	if detail.InputTokens != 3085 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 3085)
+	}
+	if detail.OutputTokens != 253 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 253)
+	}
+	if detail.CacheReadTokens != 7 {
+		t.Fatalf("cache read tokens = %d, want %d", detail.CacheReadTokens, 7)
+	}
+	if detail.CacheCreationTokens != 19514 {
+		t.Fatalf("cache creation tokens = %d, want %d", detail.CacheCreationTokens, 19514)
+	}
+	if detail.CachedTokens != 7 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 7)
+	}
+	if detail.TotalTokens != 22859 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 22859)
+	}
+}
+
+func TestParseClaudeUsageFallsBackCachedTokensToCacheCreation(t *testing.T) {
+	data := []byte(`{"usage":{"input_tokens":3085,"output_tokens":253,"cache_creation_input_tokens":19514}}`)
+	detail := ParseClaudeUsage(data)
+	if detail.CachedTokens != 19514 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 19514)
+	}
+	if detail.TotalTokens != 22852 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 22852)
+	}
+}
+
 func TestParseGeminiCLIUsage_TopLevelUsageMetadata(t *testing.T) {
 	data := []byte(`{"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":7,"thoughtsTokenCount":3,"totalTokenCount":21,"cachedContentTokenCount":5}}`)
 	detail := ParseGeminiCLIUsage(data)
@@ -149,6 +183,41 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	}
 }
 
+func TestUsageReporterTrackHTTPClientStartsTTFTBeforeRoundTrip(t *testing.T) {
+	delay := 40 * time.Millisecond
+	reporter := NewUsageReporter(context.Background(), "openai", "gpt-5.4", nil)
+	client := reporter.TrackHTTPClient(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			time.Sleep(delay)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("ok")),
+				Request:    req,
+			}, nil
+		}),
+	})
+
+	req, errNewRequest := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://example.invalid/v1/chat/completions", strings.NewReader("{}"))
+	if errNewRequest != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", errNewRequest)
+	}
+	resp, errDo := client.Do(req)
+	if errDo != nil {
+		t.Fatalf("Do() error = %v", errDo)
+	}
+	if _, errRead := io.ReadAll(resp.Body); errRead != nil {
+		t.Fatalf("ReadAll() error = %v", errRead)
+	}
+	if errClose := resp.Body.Close(); errClose != nil {
+		t.Fatalf("response body close error = %v", errClose)
+	}
+	if got := reporter.ttftDuration(); got < delay {
+		t.Fatalf("ttft = %v, want >= %v", got, delay)
+	}
+}
+
 func TestUsageReporterBuildRecordIncludesRequestedModelAlias(t *testing.T) {
 	ctx := usage.WithRequestedModelAlias(context.Background(), "client-gpt")
 	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
@@ -159,6 +228,61 @@ func TestUsageReporterBuildRecordIncludesRequestedModelAlias(t *testing.T) {
 	}
 	if record.Alias != "client-gpt" {
 		t.Fatalf("alias = %q, want %q", record.Alias, "client-gpt")
+	}
+}
+
+func TestNewExecutorUsageReporterIncludesExecutorType(t *testing.T) {
+	reporter := NewExecutorUsageReporter(context.Background(), &TestUsageExecutor{}, "gpt-5.4", nil)
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if record.Provider != "test-provider" {
+		t.Fatalf("provider = %q, want %q", record.Provider, "test-provider")
+	}
+	if record.ExecutorType != "TestUsageExecutor" {
+		t.Fatalf("executor type = %q, want %q", record.ExecutorType, "TestUsageExecutor")
+	}
+}
+
+func TestUsageReporterBuildRecordIncludesReasoningEffort(t *testing.T) {
+	ctx := usage.WithReasoningEffort(context.Background(), "medium")
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if record.ReasoningEffort != "medium" {
+		t.Fatalf("reasoning effort = %q, want %q", record.ReasoningEffort, "medium")
+	}
+}
+
+func TestUsageReporterBuildRecordIncludesServiceTier(t *testing.T) {
+	ctx := usage.WithServiceTier(context.Background(), "priority")
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if record.ServiceTier != "priority" {
+		t.Fatalf("service tier = %q, want %q", record.ServiceTier, "priority")
+	}
+}
+
+func TestUsageReporterSetTranslatedReasoningEffortUpdatesServiceTier(t *testing.T) {
+	reporter := NewUsageReporter(context.Background(), "openai", "gpt-5.4", nil)
+
+	reporter.SetTranslatedReasoningEffort([]byte(`{"service_tier":"priority"}`), "openai")
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if record.ServiceTier != "priority" {
+		t.Fatalf("service tier = %q, want %q", record.ServiceTier, "priority")
+	}
+}
+
+func TestUsageReporterSetTranslatedReasoningEffortDefaultsServiceTierWhenRemoved(t *testing.T) {
+	ctx := usage.WithServiceTier(context.Background(), "priority")
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+
+	reporter.SetTranslatedReasoningEffort([]byte(`{"model":"gpt-5.4"}`), "openai")
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if record.ServiceTier != usage.DefaultServiceTier {
+		t.Fatalf("service tier = %q, want %q", record.ServiceTier, usage.DefaultServiceTier)
 	}
 }
 
@@ -180,54 +304,14 @@ func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 	}
 }
 
-func TestDetachUsageContext_NilCtxReturnsBackground(t *testing.T) {
-	out := detachUsageContext(nil)
-	if out == nil {
-		t.Fatalf("detachUsageContext(nil) returned nil; want non-nil background-rooted ctx")
-	}
-	if internallogging.GetRequestID(out) != "" {
-		t.Fatalf("nil input must not carry a request id, got %q", internallogging.GetRequestID(out))
-	}
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
-func TestDetachUsageContext_DropsGinAndHandler(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	c, _ := gin.CreateTestContext(httptest.NewRecorder())
-	internallogging.SetGinRequestID(c, "req-from-gin")
-	parent := context.Background()
-	parent = context.WithValue(parent, "gin", c)       //nolint:staticcheck // matches sdk/api/handlers/handlers.go
-	parent = context.WithValue(parent, "handler", "x") //nolint:staticcheck // matches sdk/api/handlers/handlers.go
+type TestUsageExecutor struct{}
 
-	out := detachUsageContext(parent)
-
-	if got := out.Value("gin"); got != nil { //nolint:staticcheck
-		t.Fatalf("detached ctx still carries \"gin\" value: %T", got)
-	}
-	if got := out.Value("handler"); got != nil { //nolint:staticcheck
-		t.Fatalf("detached ctx still carries \"handler\" value: %T", got)
-	}
-	if id := internallogging.GetRequestID(out); id != "req-from-gin" {
-		t.Fatalf("request id from gin not lifted onto detached ctx; got %q want %q", id, "req-from-gin")
-	}
-}
-
-func TestDetachUsageContext_PreservesEndpointAndStatusHolder(t *testing.T) {
-	parent := context.Background()
-	parent = internallogging.WithEndpoint(parent, "/v1/chat/completions")
-	parent = internallogging.WithResponseStatusHolder(parent)
-	parent = internallogging.WithRequestID(parent, "abc12345")
-
-	out := detachUsageContext(parent)
-
-	if got := internallogging.GetEndpoint(out); got != "/v1/chat/completions" {
-		t.Fatalf("endpoint not preserved on detached ctx; got %q", got)
-	}
-	if id := internallogging.GetRequestID(out); id != "abc12345" {
-		t.Fatalf("request id not preserved on detached ctx; got %q", id)
-	}
-	// Mutate via parent, observe via detached: holder must be shared by pointer.
-	internallogging.SetResponseStatus(parent, 503)
-	if got := internallogging.GetResponseStatus(out); got != 503 {
-		t.Fatalf("response status holder not shared; detached ctx sees %d, want 503", got)
-	}
+func (TestUsageExecutor) Identifier() string {
+	return "test-provider"
 }

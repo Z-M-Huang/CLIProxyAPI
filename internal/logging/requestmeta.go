@@ -2,14 +2,22 @@ package logging
 
 import (
 	"context"
+	"net/http"
+	"sync"
 	"sync/atomic"
 )
 
 type endpointKey struct{}
 type responseStatusKey struct{}
+type responseHeadersKey struct{}
 
 type responseStatusHolder struct {
 	status atomic.Int32
+}
+
+type responseHeadersHolder struct {
+	mu      sync.RWMutex
+	headers http.Header
 }
 
 func WithEndpoint(ctx context.Context, endpoint string) context.Context {
@@ -39,6 +47,16 @@ func WithResponseStatusHolder(ctx context.Context) context.Context {
 	return context.WithValue(ctx, responseStatusKey{}, &responseStatusHolder{})
 }
 
+func WithResponseHeadersHolder(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if holder, ok := ctx.Value(responseHeadersKey{}).(*responseHeadersHolder); ok && holder != nil {
+		return ctx
+	}
+	return context.WithValue(ctx, responseHeadersKey{}, &responseHeadersHolder{})
+}
+
 func SetResponseStatus(ctx context.Context, status int) {
 	if ctx == nil || status <= 0 {
 		return
@@ -48,6 +66,19 @@ func SetResponseStatus(ctx context.Context, status int) {
 		return
 	}
 	holder.status.Store(int32(status))
+}
+
+func SetResponseHeaders(ctx context.Context, headers http.Header) {
+	if ctx == nil {
+		return
+	}
+	holder, ok := ctx.Value(responseHeadersKey{}).(*responseHeadersHolder)
+	if !ok || holder == nil {
+		return
+	}
+	holder.mu.Lock()
+	defer holder.mu.Unlock()
+	holder.headers = cloneHTTPHeader(headers)
 }
 
 func GetResponseStatus(ctx context.Context) int {
@@ -61,30 +92,26 @@ func GetResponseStatus(ctx context.Context) int {
 	return int(holder.status.Load())
 }
 
-// CopyMetadata returns dst extended with the request-scoped observability
-// metadata carried by src (endpoint, response-status holder). Callers use
-// this to hand off metadata to a long-lived async context without retaining
-// short-lived parent values such as a Gin handler's *gin.Context, which can
-// be recycled by Gin's pool after the request returns.
-//
-// The response-status holder is shared by pointer, so writes from the
-// request goroutine remain visible to async readers via the returned ctx.
-//
-// request_id is intentionally NOT copied; callers commonly need to fall
-// back to a Gin request ID when the standard context lacks one and should
-// call WithRequestID separately after composing CopyMetadata.
-func CopyMetadata(src, dst context.Context) context.Context {
-	if dst == nil {
-		dst = context.Background()
+func GetResponseHeaders(ctx context.Context) http.Header {
+	if ctx == nil {
+		return nil
 	}
-	if src == nil {
-		return dst
+	holder, ok := ctx.Value(responseHeadersKey{}).(*responseHeadersHolder)
+	if !ok || holder == nil {
+		return nil
 	}
-	if endpoint, ok := src.Value(endpointKey{}).(string); ok && endpoint != "" {
-		dst = context.WithValue(dst, endpointKey{}, endpoint)
+	holder.mu.RLock()
+	defer holder.mu.RUnlock()
+	return cloneHTTPHeader(holder.headers)
+}
+
+func cloneHTTPHeader(src http.Header) http.Header {
+	if len(src) == 0 {
+		return nil
 	}
-	if holder, ok := src.Value(responseStatusKey{}).(*responseStatusHolder); ok && holder != nil {
-		dst = context.WithValue(dst, responseStatusKey{}, holder)
+	dst := make(http.Header, len(src))
+	for key, values := range src {
+		dst[key] = append([]string(nil), values...)
 	}
 	return dst
 }

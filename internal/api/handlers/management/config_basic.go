@@ -20,17 +20,14 @@ import (
 )
 
 const (
-	// latestReleaseURL is the GitHub releases endpoint that backs the
-	// management UI's "check for update" affordance. The fork retargets it
-	// at its own release stream so the UI doesn't compare zmh-v0.1.0 against
-	// upstream's v6.x and tell users to "update to upstream".
+	// FORK[releases]: compare against the fork release stream, not upstream tags.
 	latestReleaseURL       = "https://api.github.com/repos/Z-M-Huang/CLIProxyAPI/releases/latest"
 	latestReleaseUserAgent = "CLIProxyAPI"
 )
 
 func (h *Handler) GetConfig(c *gin.Context) {
 	cfg := h.cfg()
-	if h == nil || cfg == nil {
+	if cfg == nil {
 		c.JSON(200, gin.H{})
 		return
 	}
@@ -46,8 +43,8 @@ type releaseInfo struct {
 func (h *Handler) GetLatestVersion(c *gin.Context) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	proxyURL := ""
-	if h != nil && h.cfg() != nil {
-		proxyURL = strings.TrimSpace(h.cfg().ProxyURL)
+	if cfg := h.cfg(); cfg != nil {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 	if proxyURL != "" {
 		sdkCfg := &sdkconfig.SDKConfig{ProxyURL: proxyURL}
@@ -125,13 +122,21 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_yaml", "message": err.Error()})
 		return
 	}
-	// Strict prompt-rules validation BEFORE the temp-file LoadConfigOptional dance.
-	// SanitizePromptRules (called inside LoadConfigOptional) silently drops invalid
-	// rules — we want the API caller to receive a 400 with a reason instead.
+	// FORK[prompt-rules]: API writes should fail loudly instead of silently dropping invalid rules.
 	if err = cfg.ValidatePromptRules(); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_prompt_rules", "message": err.Error()})
 		return
 	}
+	prevRules := []config.PromptRule(nil)
+	if current := h.cfg(); current != nil {
+		prevRules = append(prevRules, current.PromptRules...)
+	}
+	restorePromptRules := true
+	defer func() {
+		if restorePromptRules {
+			helps.UpdatePromptRulesSnapshot(prevRules)
+		}
+	}()
 	// Validate config using LoadConfigOptional with optional=false to enforce parsing
 	tmpDir := filepath.Dir(h.configFilePath)
 	tmpFile, err := os.CreateTemp(tmpDir, "config-validate-*.yaml")
@@ -154,50 +159,29 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 	defer func() {
 		_ = os.Remove(tempFile)
 	}()
-	// LoadConfigOptional below side-effects the global prompt-rules snapshot
-	// via SanitizePromptRules. If any later step (WriteConfig / LoadConfig)
-	// fails we must restore the previous snapshot, otherwise live requests
-	// would be rewritten by rules that were never persisted to disk. Hold
-	// h.mu across the entire validate -> write -> reload sequence so the
-	// captured snapshot baseline can't drift under us.
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	prevPromptRules := make([]config.PromptRule, 0)
-	if cur := h.cfg(); cur != nil {
-		prevPromptRules = append(prevPromptRules, cur.PromptRules...)
-	}
-	rollbackPromptRules := func() {
-		helps.UpdatePromptRulesSnapshot(prevPromptRules)
-	}
-	if _, err = config.LoadConfigOptional(tempFile, false); err != nil {
-		rollbackPromptRules()
+	_, err = config.LoadConfigOptional(tempFile, false)
+	if err != nil {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": err.Error()})
 		return
 	}
+	h.mu.Lock()
 	if WriteConfig(h.configFilePath, body) != nil {
-		rollbackPromptRules()
+		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": "failed to write config"})
 		return
 	}
 	// Reload into handler to keep memory in sync
 	newCfg, err := config.LoadConfig(h.configFilePath)
 	if err != nil {
-		// Disk now holds the new YAML, but we couldn't reload it. Roll the
-		// snapshot back to match h.cfg (still the old in-memory rules) so the
-		// runtime is at least self-consistent until the operator investigates.
-		rollbackPromptRules()
+		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "reload_failed", "message": err.Error()})
 		return
 	}
+	h.cfgValue = newCfg
 	h.cfgPtr.Store(newCfg)
-	// Defensive: explicitly republish the prompt-rules snapshot from the
-	// committed config so any premature update from the temp-file validation
-	// load is overridden. LoadConfig's Sanitize already calls the hook, but
-	// belt-and-suspenders here protects against future refactors.
-	helps.UpdatePromptRulesSnapshot(newCfg.PromptRules)
-	if commit := h.loadCommit(); commit != nil {
-		commit(newCfg)
-	}
+	restorePromptRules = false
+	h.mu.Unlock()
+	h.reloadConfigAfterManagementSave(c.Request.Context(), newCfg)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "changed": []string{"config"}})
 }
 
@@ -222,16 +206,14 @@ func (h *Handler) GetConfigYAML(c *gin.Context) {
 
 // Debug
 func (h *Handler) GetDebug(c *gin.Context) { c.JSON(200, gin.H{"debug": h.cfg().Debug}) }
-func (h *Handler) PutDebug(c *gin.Context) {
-	h.updateBoolField(c, func(cfg *config.Config, v bool) { cfg.Debug = v })
-}
+func (h *Handler) PutDebug(c *gin.Context) { h.updateBoolField(c, func(v bool) { h.cfg().Debug = v }) }
 
 // UsageStatisticsEnabled
 func (h *Handler) GetUsageStatisticsEnabled(c *gin.Context) {
 	c.JSON(200, gin.H{"usage-statistics-enabled": h.cfg().UsageStatisticsEnabled})
 }
 func (h *Handler) PutUsageStatisticsEnabled(c *gin.Context) {
-	h.updateBoolField(c, func(cfg *config.Config, v bool) { cfg.UsageStatisticsEnabled = v })
+	h.updateBoolField(c, func(v bool) { h.cfg().UsageStatisticsEnabled = v })
 }
 
 // UsageStatisticsEnabled
@@ -239,7 +221,7 @@ func (h *Handler) GetLoggingToFile(c *gin.Context) {
 	c.JSON(200, gin.H{"logging-to-file": h.cfg().LoggingToFile})
 }
 func (h *Handler) PutLoggingToFile(c *gin.Context) {
-	h.updateBoolField(c, func(cfg *config.Config, v bool) { cfg.LoggingToFile = v })
+	h.updateBoolField(c, func(v bool) { h.cfg().LoggingToFile = v })
 }
 
 // LogsMaxTotalSizeMB
@@ -258,9 +240,8 @@ func (h *Handler) PutLogsMaxTotalSizeMB(c *gin.Context) {
 	if value < 0 {
 		value = 0
 	}
-	h.applyConfigChange(c, func(cfg *config.Config) {
-		cfg.LogsMaxTotalSizeMB = value
-	})
+	h.cfg().LogsMaxTotalSizeMB = value
+	h.persist(c)
 }
 
 // ErrorLogsMaxFiles
@@ -279,9 +260,8 @@ func (h *Handler) PutErrorLogsMaxFiles(c *gin.Context) {
 	if value < 0 {
 		value = 10
 	}
-	h.applyConfigChange(c, func(cfg *config.Config) {
-		cfg.ErrorLogsMaxFiles = value
-	})
+	h.cfg().ErrorLogsMaxFiles = value
+	h.persist(c)
 }
 
 // Request log
@@ -289,7 +269,7 @@ func (h *Handler) GetRequestLog(c *gin.Context) {
 	c.JSON(200, gin.H{"request-log": h.cfg().RequestLog})
 }
 func (h *Handler) PutRequestLog(c *gin.Context) {
-	h.updateBoolField(c, func(cfg *config.Config, v bool) { cfg.RequestLog = v })
+	h.updateBoolField(c, func(v bool) { h.cfg().RequestLog = v })
 }
 
 // Websocket auth
@@ -297,7 +277,7 @@ func (h *Handler) GetWebsocketAuth(c *gin.Context) {
 	c.JSON(200, gin.H{"ws-auth": h.cfg().WebsocketAuth})
 }
 func (h *Handler) PutWebsocketAuth(c *gin.Context) {
-	h.updateBoolField(c, func(cfg *config.Config, v bool) { cfg.WebsocketAuth = v })
+	h.updateBoolField(c, func(v bool) { h.cfg().WebsocketAuth = v })
 }
 
 // Request retry
@@ -305,7 +285,7 @@ func (h *Handler) GetRequestRetry(c *gin.Context) {
 	c.JSON(200, gin.H{"request-retry": h.cfg().RequestRetry})
 }
 func (h *Handler) PutRequestRetry(c *gin.Context) {
-	h.updateIntField(c, func(cfg *config.Config, v int) { cfg.RequestRetry = v })
+	h.updateIntField(c, func(v int) { h.cfg().RequestRetry = v })
 }
 
 // Max retry interval
@@ -313,7 +293,7 @@ func (h *Handler) GetMaxRetryInterval(c *gin.Context) {
 	c.JSON(200, gin.H{"max-retry-interval": h.cfg().MaxRetryInterval})
 }
 func (h *Handler) PutMaxRetryInterval(c *gin.Context) {
-	h.updateIntField(c, func(cfg *config.Config, v int) { cfg.MaxRetryInterval = v })
+	h.updateIntField(c, func(v int) { h.cfg().MaxRetryInterval = v })
 }
 
 // ForceModelPrefix
@@ -321,7 +301,7 @@ func (h *Handler) GetForceModelPrefix(c *gin.Context) {
 	c.JSON(200, gin.H{"force-model-prefix": h.cfg().ForceModelPrefix})
 }
 func (h *Handler) PutForceModelPrefix(c *gin.Context) {
-	h.updateBoolField(c, func(cfg *config.Config, v bool) { cfg.ForceModelPrefix = v })
+	h.updateBoolField(c, func(v bool) { h.cfg().ForceModelPrefix = v })
 }
 
 func normalizeRoutingStrategy(strategy string) (string, bool) {
@@ -358,18 +338,16 @@ func (h *Handler) PutRoutingStrategy(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid strategy"})
 		return
 	}
-	h.applyConfigChange(c, func(cfg *config.Config) {
-		cfg.Routing.Strategy = normalized
-	})
+	h.cfg().Routing.Strategy = normalized
+	h.persist(c)
 }
 
 // Proxy URL
 func (h *Handler) GetProxyURL(c *gin.Context) { c.JSON(200, gin.H{"proxy-url": h.cfg().ProxyURL}) }
 func (h *Handler) PutProxyURL(c *gin.Context) {
-	h.updateStringField(c, func(cfg *config.Config, v string) { cfg.ProxyURL = v })
+	h.updateStringField(c, func(v string) { h.cfg().ProxyURL = v })
 }
 func (h *Handler) DeleteProxyURL(c *gin.Context) {
-	h.applyConfigChange(c, func(cfg *config.Config) {
-		cfg.ProxyURL = ""
-	})
+	h.cfg().ProxyURL = ""
+	h.persist(c)
 }

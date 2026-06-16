@@ -67,7 +67,7 @@ func TestService_ConfigSnapshot_RaceFree(t *testing.T) {
 		func() { _ = resolveConfigGeminiKey(s.configSnapshot(), auth) },
 		func() { _ = resolveConfigVertexCompatKey(s.configSnapshot(), auth) },
 		func() { _ = resolveConfigCodexKey(s.configSnapshot(), auth) },
-		func() { _ = s.oauthExcludedModels(s.configSnapshot(), "claude", "oauth") },
+		func() { _ = oauthExcludedModels(s.configSnapshot(), "claude", "oauth") },
 	}
 	for i := 0; i < 4; i++ {
 		for _, fn := range readers {

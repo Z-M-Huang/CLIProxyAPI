@@ -1,13 +1,16 @@
 package cache
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -30,169 +33,34 @@ const (
 	// CacheCleanupInterval controls how often stale entries are purged
 	CacheCleanupInterval = 10 * time.Minute
 
-	// SignatureGroupCapacity bounds the per-group LRU. Hash space is 64-bit, so
-	// without a bound the cache grew indefinitely with unique requests. The
-	// bound trades a hit-rate floor for a memory ceiling; eviction policy is
-	// least-recently-used (sliding TTL refresh on read also bumps recency).
-	SignatureGroupCapacity = 10_000
-
-	// MaxGroupCount caps the number of distinct model groups held by the
-	// outer signatureCache. GetModelGroup returns the raw model name for
-	// any non-{gpt,claude,gemini} model, so a workload with many unique
-	// unknown model names could otherwise grow the outer map until the
-	// 10-minute purge ran. With this cap, total memory is bounded at
-	// roughly MaxGroupCount * SignatureGroupCapacity entries.
-	MaxGroupCount = 64
+	MaxGroupCount = 128
 )
 
 // signatureCache stores signatures by model group -> textHash -> SignatureEntry
 var signatureCache sync.Map
 
-// groupCount tracks the number of groups currently in signatureCache so the
-// fast read path can stay sync.Map.Load. Written under groupEvictMu when
-// inserting/evicting.
-var groupCount atomic.Int64
-
-// groupEvictMu serialises eviction passes. The fast read path never takes it.
-var groupEvictMu sync.Mutex
-
 // cacheCleanupOnce ensures the background cleanup goroutine starts only once
 var cacheCleanupOnce sync.Once
-
-// clock returns the current time. Tests override it to exercise TTL passage
-// without sleeping. Production callers always see time.Now().
+var signatureCacheGroupMu sync.Mutex
+var groupCount atomic.Int64
 var clock = time.Now
 
-// lruEntry is one signature kept in the per-group LRU's doubly-linked list.
-type lruEntry struct {
-	textHash   string
-	signature  string
-	timestamp  time.Time
-	prev, next *lruEntry
+type signatureKVClient interface {
+	KVGet(ctx context.Context, key string) ([]byte, bool, error)
+	KVSet(ctx context.Context, key string, value []byte, opts homekv.KVSetOptions) (bool, error)
+	KVDel(ctx context.Context, keys ...string) (int64, error)
+	KVExpire(ctx context.Context, key string, ttl time.Duration) (bool, error)
 }
 
-// groupCache is the inner per-model-group cache: a bounded LRU keyed by
-// textHash. Sliding TTL is maintained by refreshing entry.timestamp on every
-// successful read; the linked list maintains recency order for eviction when
-// the entry count exceeds capacity.
-//
-// All operations hold mu — moveToFront on read mutates the list, so an
-// RWMutex would not give read-side concurrency anyway.
-//
-// lastAccess (unix nanos, atomic) tracks the most recent get/set on this
-// group so the outer-map eviction can pick the least-recently-used group
-// without taking mu.
+var currentSignatureKVClient = func() (signatureKVClient, bool, error) {
+	return homekv.CurrentKVClient()
+}
+
+// groupCache is the inner map type
 type groupCache struct {
-	mu         sync.Mutex
-	entries    map[string]*lruEntry
-	head       *lruEntry // sentinel; head.next is most-recently-used
-	tail       *lruEntry // sentinel; tail.prev is least-recently-used
-	capacity   int
-	lastAccess atomic.Int64
-}
-
-func newGroupCache(capacity int, now time.Time) *groupCache {
-	head := &lruEntry{}
-	tail := &lruEntry{}
-	head.next = tail
-	tail.prev = head
-	c := &groupCache{
-		entries:  make(map[string]*lruEntry),
-		head:     head,
-		tail:     tail,
-		capacity: capacity,
-	}
-	// Initialise lastAccess to creation time so a freshly inserted group
-	// is not the LRU eviction target before its first set/get fires
-	// (Codex Stage 1 exit review IMPORTANT BE-2).
-	c.lastAccess.Store(now.UnixNano())
-	return c
-}
-
-// link inserts e immediately after head (most-recently-used position).
-func (c *groupCache) link(e *lruEntry) {
-	e.prev = c.head
-	e.next = c.head.next
-	c.head.next.prev = e
-	c.head.next = e
-}
-
-// unlink removes e from the list.
-func (c *groupCache) unlink(e *lruEntry) {
-	e.prev.next = e.next
-	e.next.prev = e.prev
-	e.prev = nil
-	e.next = nil
-}
-
-func (c *groupCache) moveToFront(e *lruEntry) {
-	c.unlink(e)
-	c.link(e)
-}
-
-// get returns the signature and true if the entry exists and is within TTL,
-// refreshing its timestamp (sliding) and bumping it to most-recently-used.
-// Expired or missing entries return ("", false) and remove themselves.
-//
-// lastAccess is intentionally NOT updated on read. CacheSignature fires
-// every time the system caches a new sig, so writes alone keep the
-// group's lastAccess fresh. Bumping it on every read added per-call
-// atomic.Int64 contention that pushed Get_Hit_Parallel past the ±5%
-// bench target. The LRU policy degrades to "least recently written
-// group" — fine because production model surfaces stay well under the
-// 64-group cap and eviction effectively never fires.
-func (c *groupCache) get(textHash string, now time.Time, ttl time.Duration) (string, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	e, ok := c.entries[textHash]
-	if !ok {
-		return "", false
-	}
-	if now.Sub(e.timestamp) > ttl {
-		c.unlink(e)
-		delete(c.entries, textHash)
-		return "", false
-	}
-	e.timestamp = now
-	c.moveToFront(e)
-	return e.signature, true
-}
-
-// set inserts or updates an entry, evicting the LRU tail if capacity is exceeded.
-func (c *groupCache) set(textHash, signature string, now time.Time) {
-	c.lastAccess.Store(now.UnixNano())
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if e, ok := c.entries[textHash]; ok {
-		e.signature = signature
-		e.timestamp = now
-		c.moveToFront(e)
-		return
-	}
-	e := &lruEntry{textHash: textHash, signature: signature, timestamp: now}
-	c.link(e)
-	c.entries[textHash] = e
-	if len(c.entries) > c.capacity {
-		oldest := c.tail.prev
-		if oldest != c.head {
-			c.unlink(oldest)
-			delete(c.entries, oldest.textHash)
-		}
-	}
-}
-
-// purgeExpired removes entries older than ttl. Returns true if the group is
-// now empty (caller may delete the group entirely).
-func (c *groupCache) purgeExpired(now time.Time, ttl time.Duration) (empty bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for k, e := range c.entries {
-		if now.Sub(e.timestamp) > ttl {
-			c.unlink(e)
-			delete(c.entries, k)
-		}
-	}
-	return len(c.entries) == 0
+	mu         sync.RWMutex
+	entries    map[string]SignatureEntry
+	lastAccess time.Time
 }
 
 // hashText creates a stable, Unicode-safe key from text content
@@ -201,66 +69,76 @@ func hashText(text string) string {
 	return hex.EncodeToString(h[:])[:SignatureTextHashLen]
 }
 
-// getOrCreateGroupCache gets or creates a cache bucket for a model group.
-// Cold inserts (and any required LRU eviction to honor MaxGroupCount)
-// are serialised under groupEvictMu so the cap holds exactly under
-// concurrent first-time inserts (Codex Stage 1 exit review IMPORTANT
-// BE-2). The fast-path Load remains lock-free.
+// getOrCreateGroupCache gets or creates a cache bucket for a model group
 func getOrCreateGroupCache(groupKey string) *groupCache {
 	// Start background cleanup on first access
 	cacheCleanupOnce.Do(startCacheCleanup)
 
+	now := clock()
+	signatureCacheGroupMu.Lock()
+	defer signatureCacheGroupMu.Unlock()
+
 	if val, ok := signatureCache.Load(groupKey); ok {
-		return val.(*groupCache)
+		sc := val.(*groupCache)
+		sc.touch(now)
+		return sc
 	}
-
-	groupEvictMu.Lock()
-	defer groupEvictMu.Unlock()
-
-	// Re-check after taking the lock — another inserter may have just
-	// stored this exact group key.
-	if val, ok := signatureCache.Load(groupKey); ok {
-		return val.(*groupCache)
-	}
-
-	// Evict in a loop while we are at or above the cap. Without the loop,
-	// a burst of concurrent inserts that all observed count<cap before
-	// taking the lock could each insert and push the count past the cap;
-	// the loop ensures only one inserter at a time crosses the boundary.
 	for groupCount.Load() >= MaxGroupCount {
-		if !evictOldestGroupLocked() {
+		if !evictOldestSignatureGroupLocked("") {
 			break
 		}
 	}
-
-	sc := newGroupCache(SignatureGroupCapacity, clock())
-	if actual, loaded := signatureCache.LoadOrStore(groupKey, sc); loaded {
-		return actual.(*groupCache)
+	sc := &groupCache{entries: make(map[string]SignatureEntry), lastAccess: now}
+	actual, _ := signatureCache.LoadOrStore(groupKey, sc)
+	if actual == sc {
+		groupCount.Add(1)
+	} else {
+		sc = actual.(*groupCache)
+		sc.touch(now)
 	}
-	groupCount.Add(1)
+	for groupCount.Load() > MaxGroupCount {
+		if !evictOldestSignatureGroupLocked(groupKey) {
+			break
+		}
+	}
 	return sc
 }
 
-// evictOldestGroupLocked removes the group with the oldest lastAccess
-// timestamp. Caller must hold groupEvictMu. Returns true if an eviction
-// occurred. False means the outer map was empty; the caller should
-// stop trying to evict.
-func evictOldestGroupLocked() bool {
+func (sc *groupCache) touch(now time.Time) {
+	if sc == nil {
+		return
+	}
+	sc.mu.Lock()
+	sc.lastAccess = now
+	sc.mu.Unlock()
+}
+
+func evictOldestSignatureGroupLocked(protect string) bool {
 	var oldestKey any
-	oldestAccess := int64(1<<63 - 1)
+	var oldestTime time.Time
 	signatureCache.Range(func(key, value any) bool {
-		sc := value.(*groupCache)
-		if access := sc.lastAccess.Load(); access < oldestAccess {
-			oldestAccess = access
+		if key == protect {
+			return true
+		}
+		sc, ok := value.(*groupCache)
+		if !ok || sc == nil {
+			return true
+		}
+		sc.mu.RLock()
+		lastAccess := sc.lastAccess
+		sc.mu.RUnlock()
+		if oldestKey == nil || lastAccess.Before(oldestTime) {
 			oldestKey = key
+			oldestTime = lastAccess
 		}
 		return true
 	})
-	if oldestKey != nil {
-		if _, ok := signatureCache.LoadAndDelete(oldestKey); ok {
-			groupCount.Add(-1)
-			return true
-		}
+	if oldestKey == nil {
+		return false
+	}
+	if _, loaded := signatureCache.LoadAndDelete(oldestKey); loaded {
+		groupCount.Add(-1)
+		return true
 	}
 	return false
 }
@@ -278,85 +156,203 @@ func startCacheCleanup() {
 }
 
 // purgeExpiredCaches removes caches with no valid (non-expired) entries.
-// Decrements groupCount for each group it removes so the outer-map cap
-// stays in sync.
 func purgeExpiredCaches() {
 	now := clock()
 	signatureCache.Range(func(key, value any) bool {
 		sc := value.(*groupCache)
-		if sc.purgeExpired(now, SignatureCacheTTL) {
-			if _, ok := signatureCache.LoadAndDelete(key); ok {
+		sc.mu.Lock()
+		// Remove expired entries
+		for k, entry := range sc.entries {
+			if now.Sub(entry.Timestamp) > SignatureCacheTTL {
+				delete(sc.entries, k)
+			}
+		}
+		isEmpty := len(sc.entries) == 0
+		sc.mu.Unlock()
+		// Remove cache bucket if empty
+		if isEmpty {
+			if _, loaded := signatureCache.LoadAndDelete(key); loaded {
 				groupCount.Add(-1)
 			}
 		}
 		return true
 	})
+	purgeExpiredCodexReasoningReplayCache(now)
 }
 
 // CacheSignature stores a thinking signature for a given model group and text.
 // Used for Claude models that require signed thinking blocks in multi-turn conversations.
 func CacheSignature(modelName, text, signature string) {
+	CacheSignatureBestEffort(context.Background(), modelName, text, signature)
+}
+
+// CacheSignatureBestEffort stores a thinking signature for completed response paths.
+func CacheSignatureBestEffort(ctx context.Context, modelName, text, signature string) bool {
 	if text == "" || signature == "" {
-		return
+		return false
 	}
 	if len(signature) < MinValidSignatureLen {
-		return
+		return false
+	}
+
+	if client, homeMode, errClient := currentSignatureKVClient(); homeMode {
+		if errClient != nil {
+			log.Errorf("home kv best-effort signature set failed prefix=cpa:signature:*: %v", errClient)
+			return false
+		}
+		written, errSet := client.KVSet(ctx, signatureKVKey(modelName, text), []byte(signature), homekv.KVSetOptions{EX: SignatureCacheTTL})
+		if errSet != nil {
+			log.Errorf("home kv best-effort signature set failed prefix=cpa:signature:*: %v", errSet)
+			return false
+		}
+		return written
 	}
 
 	groupKey := GetModelGroup(modelName)
 	textHash := hashText(text)
 	sc := getOrCreateGroupCache(groupKey)
-	sc.set(textHash, signature, clock())
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+
+	sc.entries[textHash] = SignatureEntry{
+		Signature: signature,
+		Timestamp: clock(),
+	}
+	sc.lastAccess = clock()
+	return true
 }
 
 // GetCachedSignature retrieves a cached signature for a given model group and text.
-// Returns empty string if not found or expired. For the gemini group, returns the
-// "skip_thought_signature_validator" miss sentinel for empty/miss/expired keys.
+// Returns empty string if not found or expired.
 func GetCachedSignature(modelName, text string) string {
+	signature, errSignature := GetCachedSignatureRequired(context.Background(), modelName, text)
+	if errSignature != nil {
+		return ""
+	}
+	return signature
+}
+
+// GetCachedSignatureRequired retrieves a cached signature for request-time paths.
+func GetCachedSignatureRequired(ctx context.Context, modelName, text string) (string, error) {
 	groupKey := GetModelGroup(modelName)
 
 	if text == "" {
 		if groupKey == "gemini" {
-			return "skip_thought_signature_validator"
+			return "skip_thought_signature_validator", nil
 		}
-		return ""
+		return "", nil
 	}
+
+	if client, homeMode, errClient := currentSignatureKVClient(); homeMode {
+		if errClient != nil {
+			return "", errClient
+		}
+		key := signatureKVKey(modelName, text)
+		raw, found, errGet := client.KVGet(ctx, key)
+		if errGet != nil {
+			return "", errGet
+		}
+		if !found {
+			if groupKey == "gemini" {
+				return "skip_thought_signature_validator", nil
+			}
+			return "", nil
+		}
+		if _, errExpire := client.KVExpire(ctx, key, SignatureCacheTTL); errExpire != nil {
+			return "", errExpire
+		}
+		return string(raw), nil
+	}
+
 	val, ok := signatureCache.Load(groupKey)
 	if !ok {
 		if groupKey == "gemini" {
-			return "skip_thought_signature_validator"
+			return "skip_thought_signature_validator", nil
 		}
-		return ""
+		return "", nil
 	}
 	sc := val.(*groupCache)
+
 	textHash := hashText(text)
 
-	sig, hit := sc.get(textHash, clock(), SignatureCacheTTL)
-	if !hit {
+	now := clock()
+
+	sc.mu.Lock()
+	sc.lastAccess = now
+	entry, exists := sc.entries[textHash]
+	if !exists {
+		sc.mu.Unlock()
 		if groupKey == "gemini" {
-			return "skip_thought_signature_validator"
+			return "skip_thought_signature_validator", nil
 		}
-		return ""
+		return "", nil
 	}
-	return sig
+	if now.Sub(entry.Timestamp) > SignatureCacheTTL {
+		delete(sc.entries, textHash)
+		sc.mu.Unlock()
+		if groupKey == "gemini" {
+			return "skip_thought_signature_validator", nil
+		}
+		return "", nil
+	}
+
+	// Refresh TTL on access (sliding expiration).
+	entry.Timestamp = now
+	sc.entries[textHash] = entry
+	sc.mu.Unlock()
+
+	return entry.Signature, nil
 }
 
 // ClearSignatureCache clears signature cache for a specific model group or all groups.
-// Keeps groupCount in sync with the outer map size.
 func ClearSignatureCache(modelName string) {
+	signatureCacheGroupMu.Lock()
+	defer signatureCacheGroupMu.Unlock()
 	if modelName == "" {
 		signatureCache.Range(func(key, _ any) bool {
-			if _, ok := signatureCache.LoadAndDelete(key); ok {
-				groupCount.Add(-1)
-			}
+			signatureCache.Delete(key)
 			return true
 		})
+		groupCount.Store(0)
 		return
 	}
 	groupKey := GetModelGroup(modelName)
-	if _, ok := signatureCache.LoadAndDelete(groupKey); ok {
+	if _, loaded := signatureCache.LoadAndDelete(groupKey); loaded {
 		groupCount.Add(-1)
 	}
+}
+
+// DeleteCachedSignatureRequired removes one exact cached signature.
+func DeleteCachedSignatureRequired(ctx context.Context, modelName, text string) error {
+	if text == "" {
+		return nil
+	}
+	if client, homeMode, errClient := currentSignatureKVClient(); homeMode {
+		if errClient != nil {
+			return errClient
+		}
+		_, errDel := client.KVDel(ctx, signatureKVKey(modelName, text))
+		return errDel
+	}
+	groupKey := GetModelGroup(modelName)
+	textHash := hashText(text)
+	val, ok := signatureCache.Load(groupKey)
+	if !ok {
+		return nil
+	}
+	sc := val.(*groupCache)
+	sc.mu.Lock()
+	delete(sc.entries, textHash)
+	isEmpty := len(sc.entries) == 0
+	sc.mu.Unlock()
+	if isEmpty {
+		signatureCacheGroupMu.Lock()
+		if _, loaded := signatureCache.LoadAndDelete(groupKey); loaded {
+			groupCount.Add(-1)
+		}
+		signatureCacheGroupMu.Unlock()
+	}
+	return nil
 }
 
 // HasValidSignature checks if a signature is valid (non-empty and long enough)
@@ -373,6 +369,10 @@ func GetModelGroup(modelName string) string {
 		return "gemini"
 	}
 	return modelName
+}
+
+func signatureKVKey(modelName, text string) string {
+	return fmt.Sprintf("cpa:signature:%s:%s", GetModelGroup(modelName), homekv.HashKeyPart(text))
 }
 
 var signatureCacheEnabled atomic.Bool

@@ -111,9 +111,8 @@ func TestServer_ConfigHotReload_NoRaceUnderConcurrentReads(t *testing.T) {
 	wg.Wait()
 }
 
-// TestServer_MgmtHandlers_HotReloadRace drives real mgmt handlers
-// (PutDebug, PutAmpUpstreamURL, PutAmpModelMappings) directly against
-// the Handler concurrently with Server.Config() readers. Each handler
+// TestServer_MgmtHandlers_HotReloadRace drives a real mgmt handler
+// directly against the Handler concurrently with Server.Config() readers. The handler
 // enters applyConfigChange — clones the snapshot, mutates, persists,
 // atomic-swaps Handler.cfgPtr, fires the commit hook (which does
 // Server.UpdateClients fan-out and re-binds executors). The race test
@@ -152,8 +151,6 @@ func TestServer_MgmtHandlers_HotReloadRace(t *testing.T) {
 					if cfg != nil {
 						_ = cfg.AuthDir
 						_ = cfg.Debug
-						_ = cfg.AmpCode.UpstreamURL
-						_ = cfg.AmpCode.ModelMappings
 					}
 				}
 			}
@@ -179,58 +176,6 @@ func TestServer_MgmtHandlers_HotReloadRace(t *testing.T) {
 				c.Request = httptest.NewRequest(http.MethodPut, "/v0/management/debug", bytes.NewReader(body))
 				c.Request.Header.Set("Content-Type", "application/json")
 				server.mgmt.PutDebug(c)
-			}
-		}
-	}()
-
-	// Writer 2: PutAmpUpstreamURL — fires through the same chain on a
-	// nested AmpCode field.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		flip := false
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-				flip = !flip
-				url := "https://a.example.com"
-				if !flip {
-					url = "https://b.example.com"
-				}
-				body := []byte(`{"upstream_url":"` + url + `"}`)
-				c, _ := gin.CreateTestContext(httptest.NewRecorder())
-				c.Request = httptest.NewRequest(http.MethodPut, "/v0/management/ampcode/upstream-url", bytes.NewReader(body))
-				c.Request.Header.Set("Content-Type", "application/json")
-				server.mgmt.PutAmpUpstreamURL(c)
-			}
-		}
-	}()
-
-	// Writer 3: PutAmpModelMappings — biggest payload; triggers full
-	// clone-modify-persist-swap on a slice-of-struct field.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		flip := false
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-				flip = !flip
-				from := "model-A"
-				to := "model-B"
-				if !flip {
-					from = "model-C"
-					to = "model-D"
-				}
-				body := []byte(`{"model_mappings":[{"from":"` + from + `","to":"` + to + `"}]}`)
-				c, _ := gin.CreateTestContext(httptest.NewRecorder())
-				c.Request = httptest.NewRequest(http.MethodPut, "/v0/management/ampcode/model-mappings", bytes.NewReader(body))
-				c.Request.Header.Set("Content-Type", "application/json")
-				server.mgmt.PutAmpModelMappings(c)
 			}
 		}
 	}()
