@@ -4,8 +4,24 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/tidwall/gjson"
 )
+
+func TestGeminiCLIUserAgentDefaultFromConfig(t *testing.T) {
+	if got := geminiCLIUserAgent("gemini-2.5-pro", &config.Config{}); got != misc.GeminiCLIUserAgent("gemini-2.5-pro") {
+		t.Fatalf("geminiCLIUserAgent default = %q, want %q", got, misc.GeminiCLIUserAgent("gemini-2.5-pro"))
+	}
+	cfg := &config.Config{
+		GeminiCLIHeaderDefaults: config.GeminiCLIHeaderDefaults{
+			UserAgent: "custom-gemini-cli/1.0",
+		},
+	}
+	if got := geminiCLIUserAgent("gemini-2.5-pro", cfg); got != "custom-gemini-cli/1.0" {
+		t.Fatalf("geminiCLIUserAgent configured = %q, want custom-gemini-cli/1.0", got)
+	}
+}
 
 func TestCleanGeminiCLIRequestSchemasFlattensFunctionDeclarationTypeArray(t *testing.T) {
 	input := []byte(`{

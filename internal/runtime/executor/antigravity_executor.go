@@ -445,7 +445,7 @@ func (e *AntigravityExecutor) HttpRequest(ctx context.Context, auth *cliproxyaut
 		httpReq.Header.Set("Content-Type", contentType)
 	}
 	// Content-Length is managed automatically by Go's http.Client from the Body
-	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+	httpReq.Header.Set("User-Agent", resolveUserAgent(e.cfg, auth))
 	httpReq.Close = true // sends Connection: close
 
 	// Inject Authorization: Bearer <token>
@@ -1694,7 +1694,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		httpReq.Close = true
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+token)
-		httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+		httpReq.Header.Set("User-Agent", resolveUserAgent(e.cfg, auth))
 		if host := resolveHost(base); host != "" {
 			httpReq.Host = host
 		}
@@ -2072,7 +2072,7 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 		return
 	}
 
-	userAgent := resolveUserAgent(auth)
+	userAgent := resolveUserAgent(e.cfg, auth)
 	loadReqBody, errMarshal := json.Marshal(map[string]any{
 		"metadata": map[string]string{
 			"ideType": "ANTIGRAVITY",
@@ -2229,7 +2229,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	httpReq.Close = true
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+token)
-	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+	httpReq.Header.Set("User-Agent", resolveUserAgent(e.cfg, auth))
 	if host := resolveHost(base); host != "" {
 		httpReq.Host = host
 	}
@@ -2415,15 +2415,20 @@ func resolveHost(base string) string {
 	return strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://")
 }
 
-func resolveUserAgent(auth *cliproxyauth.Auth) string {
-	return misc.AntigravityRequestUserAgent(antigravityConfiguredUserAgent(auth))
+func resolveUserAgent(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	return misc.AntigravityRequestUserAgent(antigravityConfiguredUserAgent(cfg, auth))
 }
 
-func resolveLoadCodeAssistUserAgent(auth *cliproxyauth.Auth) string {
-	return misc.AntigravityLoadCodeAssistUserAgent(antigravityConfiguredUserAgent(auth))
+func resolveLoadCodeAssistUserAgent(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	return misc.AntigravityLoadCodeAssistUserAgent(antigravityConfiguredUserAgent(cfg, auth))
 }
 
-func antigravityConfiguredUserAgent(auth *cliproxyauth.Auth) string {
+func antigravityConfiguredUserAgent(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	if cfg != nil {
+		if userAgent := strings.TrimSpace(cfg.AntigravityHeaderDefaults.UserAgent); userAgent != "" {
+			return userAgent
+		}
+	}
 	raw := ""
 	if auth != nil {
 		if auth.Attributes != nil {
