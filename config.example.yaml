@@ -296,6 +296,18 @@ nonstream-keepalive-interval: 0
 #   user-agent: "codex_cli_rs/0.114.0 (Mac OS 14.2.0; x86_64) vscode/1.111.0"
 #   beta-features: "multi_agent"
 
+# Default User-Agent headers for provider requests. Leave unset to preserve the
+# built-in generated/provider-specific default. Provider-specific headers under
+# openai-compatibility[].headers override openai-compatibility-header-defaults.
+# gemini-cli-header-defaults:
+#   user-agent: "GeminiCLI/0.34.0/unknown (darwin; arm64; terminal)"
+# openai-compatibility-header-defaults:
+#   user-agent: "cli-proxy-openai-compat"
+# kimi-header-defaults:
+#   user-agent: "KimiCLI/1.10.6"
+# antigravity-header-defaults:
+#   user-agent: "antigravity/1.23.2 darwin/arm64"
+
 # OpenAI compatibility providers
 # openai-compatibility:
 #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.

@@ -125,6 +125,9 @@ type Config struct {
 	// These are used only when the client does not send its own headers.
 	CodexHeaderDefaults CodexHeaderDefaults `yaml:"codex-header-defaults" json:"codex-header-defaults"`
 
+	// GeminiCLIHeaderDefaults configures fallback headers for Gemini CLI OAuth model requests.
+	GeminiCLIHeaderDefaults GeminiCLIHeaderDefaults `yaml:"gemini-cli-header-defaults" json:"gemini-cli-header-defaults"`
+
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
 
@@ -142,6 +145,15 @@ type Config struct {
 
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
+
+	// OpenAICompatibilityHeaderDefaults configures default headers for OpenAI-compatible provider requests.
+	OpenAICompatibilityHeaderDefaults OpenAICompatibilityHeaderDefaults `yaml:"openai-compatibility-header-defaults" json:"openai-compatibility-header-defaults"`
+
+	// KimiHeaderDefaults configures fallback headers for Kimi OAuth model requests.
+	KimiHeaderDefaults KimiHeaderDefaults `yaml:"kimi-header-defaults" json:"kimi-header-defaults"`
+
+	// AntigravityHeaderDefaults configures fallback headers for Antigravity OAuth model requests.
+	AntigravityHeaderDefaults AntigravityHeaderDefaults `yaml:"antigravity-header-defaults" json:"antigravity-header-defaults"`
 
 	// VertexCompatAPIKey defines Vertex AI-compatible API key configurations for third-party providers.
 	// Used for services that use Vertex AI-style paths but with simple API key authentication.
@@ -269,6 +281,11 @@ type ClaudeHeaderDefaults struct {
 type CodexHeaderDefaults struct {
 	UserAgent    string `yaml:"user-agent" json:"user-agent"`
 	BetaFeatures string `yaml:"beta-features" json:"beta-features"`
+}
+
+// GeminiCLIHeaderDefaults configures fallback header values injected into Gemini CLI requests.
+type GeminiCLIHeaderDefaults struct {
+	UserAgent string `yaml:"user-agent" json:"user-agent"`
 }
 
 // CodexConfig configures provider-wide Codex request behavior.
@@ -613,6 +630,22 @@ type OpenAICompatibility struct {
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
 }
 
+// OpenAICompatibilityHeaderDefaults configures fallback header values injected into
+// OpenAI-compatible provider requests. Provider-specific custom headers override these defaults.
+type OpenAICompatibilityHeaderDefaults struct {
+	UserAgent string `yaml:"user-agent" json:"user-agent"`
+}
+
+// KimiHeaderDefaults configures fallback header values injected into Kimi requests.
+type KimiHeaderDefaults struct {
+	UserAgent string `yaml:"user-agent" json:"user-agent"`
+}
+
+// AntigravityHeaderDefaults configures fallback header values injected into Antigravity requests.
+type AntigravityHeaderDefaults struct {
+	UserAgent string `yaml:"user-agent" json:"user-agent"`
+}
+
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.
 type OpenAICompatibilityAPIKey struct {
 	// APIKey is the authentication key for accessing the external API services.
@@ -768,6 +801,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Codex header defaults.
 	cfg.SanitizeCodexHeaderDefaults()
 
+	// Sanitize Gemini CLI header defaults.
+	cfg.SanitizeGeminiCLIHeaderDefaults()
+
 	// Sanitize Claude header defaults.
 	cfg.SanitizeClaudeHeaderDefaults()
 
@@ -776,6 +812,15 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Sanitize OpenAI compatibility providers: drop entries without base-url
 	cfg.SanitizeOpenAICompatibility()
+
+	// Sanitize OpenAI-compatible header defaults.
+	cfg.SanitizeOpenAICompatibilityHeaderDefaults()
+
+	// Sanitize Kimi header defaults.
+	cfg.SanitizeKimiHeaderDefaults()
+
+	// Sanitize Antigravity header defaults.
+	cfg.SanitizeAntigravityHeaderDefaults()
 
 	// Normalize OAuth provider model exclusion map.
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
@@ -883,6 +928,15 @@ func (cfg *Config) SanitizeCodexHeaderDefaults() {
 	cfg.CodexHeaderDefaults.BetaFeatures = strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
 }
 
+// SanitizeGeminiCLIHeaderDefaults trims surrounding whitespace from the
+// configured Gemini CLI fallback header values.
+func (cfg *Config) SanitizeGeminiCLIHeaderDefaults() {
+	if cfg == nil {
+		return
+	}
+	cfg.GeminiCLIHeaderDefaults.UserAgent = strings.TrimSpace(cfg.GeminiCLIHeaderDefaults.UserAgent)
+}
+
 // SanitizeClaudeHeaderDefaults trims surrounding whitespace from the
 // configured Claude fingerprint baseline values.
 func (cfg *Config) SanitizeClaudeHeaderDefaults() {
@@ -895,6 +949,33 @@ func (cfg *Config) SanitizeClaudeHeaderDefaults() {
 	cfg.ClaudeHeaderDefaults.OS = strings.TrimSpace(cfg.ClaudeHeaderDefaults.OS)
 	cfg.ClaudeHeaderDefaults.Arch = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Arch)
 	cfg.ClaudeHeaderDefaults.Timeout = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Timeout)
+}
+
+// SanitizeOpenAICompatibilityHeaderDefaults trims surrounding whitespace from
+// configured OpenAI-compatible fallback header values.
+func (cfg *Config) SanitizeOpenAICompatibilityHeaderDefaults() {
+	if cfg == nil {
+		return
+	}
+	cfg.OpenAICompatibilityHeaderDefaults.UserAgent = strings.TrimSpace(cfg.OpenAICompatibilityHeaderDefaults.UserAgent)
+}
+
+// SanitizeKimiHeaderDefaults trims surrounding whitespace from the configured
+// Kimi fallback header values.
+func (cfg *Config) SanitizeKimiHeaderDefaults() {
+	if cfg == nil {
+		return
+	}
+	cfg.KimiHeaderDefaults.UserAgent = strings.TrimSpace(cfg.KimiHeaderDefaults.UserAgent)
+}
+
+// SanitizeAntigravityHeaderDefaults trims surrounding whitespace from the
+// configured Antigravity fallback header values.
+func (cfg *Config) SanitizeAntigravityHeaderDefaults() {
+	if cfg == nil {
+		return
+	}
+	cfg.AntigravityHeaderDefaults.UserAgent = strings.TrimSpace(cfg.AntigravityHeaderDefaults.UserAgent)
 }
 
 // SanitizeOAuthModelAlias normalizes and deduplicates global OAuth model name aliases.

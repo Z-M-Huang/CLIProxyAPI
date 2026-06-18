@@ -9,9 +9,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
+
+func TestAntigravityUserAgentDefaultFromConfig(t *testing.T) {
+	if got := resolveUserAgent(&config.Config{}, nil); got != misc.AntigravityRequestUserAgent("") {
+		t.Fatalf("resolveUserAgent default = %q, want %q", got, misc.AntigravityRequestUserAgent(""))
+	}
+	cfg := &config.Config{
+		AntigravityHeaderDefaults: config.AntigravityHeaderDefaults{
+			UserAgent: "antigravity/1.23.2 linux/x64 google-api-nodejs-client/10.3.0",
+		},
+	}
+	if got := resolveUserAgent(cfg, nil); got != "antigravity/1.23.2 linux/x64" {
+		t.Fatalf("resolveUserAgent configured = %q, want antigravity/1.23.2 linux/x64", got)
+	}
+	if got := resolveLoadCodeAssistUserAgent(cfg, nil); got != "antigravity/1.23.2 linux/x64 google-api-nodejs-client/10.3.0" {
+		t.Fatalf("resolveLoadCodeAssistUserAgent configured = %q, want antigravity/1.23.2 linux/x64 google-api-nodejs-client/10.3.0", got)
+	}
+}
 
 func TestAntigravityBuildRequest_SanitizesGeminiToolSchema(t *testing.T) {
 	body := buildRequestBodyFromPayload(t, "gemini-2.5-pro")

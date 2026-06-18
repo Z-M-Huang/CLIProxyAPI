@@ -62,6 +62,78 @@ func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatExecutorUserAgentDefaultFromConfig(t *testing.T) {
+	tests := []struct {
+		name       string
+		cfg        *config.Config
+		attributes map[string]string
+		want       string
+	}{
+		{
+			name: "configured default",
+			cfg: &config.Config{
+				OpenAICompatibilityHeaderDefaults: config.OpenAICompatibilityHeaderDefaults{
+					UserAgent: "custom-openai-compat/1.0",
+				},
+			},
+			attributes: map[string]string{},
+			want:       "custom-openai-compat/1.0",
+		},
+		{
+			name: "provider custom header overrides configured default",
+			cfg: &config.Config{
+				OpenAICompatibilityHeaderDefaults: config.OpenAICompatibilityHeaderDefaults{
+					UserAgent: "custom-openai-compat/1.0",
+				},
+			},
+			attributes: map[string]string{"header:User-Agent": "provider-override/2.0"},
+			want:       "provider-override/2.0",
+		},
+		{
+			name:       "fallback default",
+			cfg:        &config.Config{},
+			attributes: map[string]string{},
+			want:       openAICompatDefaultUserAgent,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotUserAgent string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotUserAgent = r.Header.Get("User-Agent")
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+			}))
+			defer server.Close()
+
+			attrs := map[string]string{
+				"base_url": server.URL + "/v1",
+				"api_key":  "test",
+			}
+			for key, value := range tt.attributes {
+				attrs[key] = value
+			}
+
+			executor := NewOpenAICompatExecutor("openai-compatibility", tt.cfg)
+			auth := &cliproxyauth.Auth{Attributes: attrs}
+			_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "custom-openai",
+				Payload: []byte(`{"model":"custom-openai","messages":[{"role":"user","content":"hi"}]}`),
+			}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FromString("openai"),
+				Stream:       false,
+			})
+			if err != nil {
+				t.Fatalf("Execute error: %v", err)
+			}
+			if gotUserAgent != tt.want {
+				t.Fatalf("User-Agent = %q, want %q", gotUserAgent, tt.want)
+			}
+		})
+	}
+}
+
 func TestOpenAICompatExecutorPayloadOverrideWinsOverThinkingSuffix(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
