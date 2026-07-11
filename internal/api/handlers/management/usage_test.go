@@ -1,17 +1,78 @@
 package management
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usagestore"
 )
 
+func TestPersistedUsageOverviewAndEventFilters(t *testing.T) {
+	t.Parallel()
+
+	store, err := usagestore.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer func() {
+		if errClose := store.Close(); errClose != nil {
+			t.Fatalf("Close() error = %v", errClose)
+		}
+	}()
+
+	baseTime := time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)
+	for _, event := range []usagestore.UsageEvent{
+		{EventKey: "event-a", APIGroupKey: "team", Model: "model-a", Timestamp: baseTime, AuthIndex: "auth-a", Tokens: usagestore.TokenStats{TotalTokens: 10}},
+		{EventKey: "event-b", APIGroupKey: "team", Model: "model-a", Timestamp: baseTime.Add(time.Minute), AuthIndex: "auth-b", Failed: true, Tokens: usagestore.TokenStats{TotalTokens: 20}},
+	} {
+		inserted, errInsert := store.InsertUsageEvent(context.Background(), event)
+		if errInsert != nil || !inserted {
+			t.Fatalf("InsertUsageEvent(%s) = inserted:%t err:%v", event.EventKey, inserted, errInsert)
+		}
+	}
+	h := &Handler{usageStore: store}
+
+	overviewRecorder := httptest.NewRecorder()
+	overviewContext, _ := gin.CreateTestContext(overviewRecorder)
+	overviewContext.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/overview", nil)
+	h.GetUsageOverview(overviewContext)
+	if overviewRecorder.Code != http.StatusOK {
+		t.Fatalf("overview status = %d body=%s", overviewRecorder.Code, overviewRecorder.Body.String())
+	}
+	var overviewPayload struct {
+		Usage usagestore.StatisticsSnapshot `json:"usage"`
+	}
+	if err = json.Unmarshal(overviewRecorder.Body.Bytes(), &overviewPayload); err != nil {
+		t.Fatalf("unmarshal overview: %v", err)
+	}
+	if overviewPayload.Usage.TotalRequests != 2 || overviewPayload.Usage.SuccessCount != 1 || overviewPayload.Usage.FailureCount != 1 {
+		t.Fatalf("overview usage = %+v", overviewPayload.Usage)
+	}
+
+	eventsRecorder := httptest.NewRecorder()
+	eventsContext, _ := gin.CreateTestContext(eventsRecorder)
+	eventsContext.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/events?auth_index=auth-b", nil)
+	h.GetUsageEvents(eventsContext)
+	if eventsRecorder.Code != http.StatusOK {
+		t.Fatalf("events status = %d body=%s", eventsRecorder.Code, eventsRecorder.Body.String())
+	}
+	var page usagestore.UsageEventsPage
+	if err = json.Unmarshal(eventsRecorder.Body.Bytes(), &page); err != nil {
+		t.Fatalf("unmarshal events: %v", err)
+	}
+	if page.TotalCount != 1 || len(page.Events) != 1 || page.Events[0].AuthIndex != "auth-b" {
+		t.Fatalf("filtered events = %+v", page)
+	}
+}
+
 func TestGetUsageQueuePopsRequestedRecords(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	withManagementUsageQueue(t, func() {
 		redisqueue.Enqueue([]byte(`{"id":1}`))
 		redisqueue.Enqueue([]byte(`{"id":2}`))
@@ -46,7 +107,6 @@ func TestGetUsageQueuePopsRequestedRecords(t *testing.T) {
 }
 
 func TestGetUsageQueueInvalidCountDoesNotPop(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	withManagementUsageQueue(t, func() {
 		redisqueue.Enqueue([]byte(`{"id":1}`))
 

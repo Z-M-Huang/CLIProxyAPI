@@ -37,8 +37,8 @@ func applyResponses(payload string) []byte {
 func applyGemini(payload string) []byte {
 	return ApplyPromptRules("gemini", "gemini-3-pro", []byte(payload), "/v1beta/models/gemini-3-pro:generateContent", "")
 }
-func applyGeminiCLI(payload string) []byte {
-	return ApplyPromptRules("gemini-cli", "gemini-3-pro", []byte(payload), "/v1internal:generateContent", "")
+func applyInteractions(payload string) []byte {
+	return ApplyPromptRules("interactions", "gemini-3-pro", []byte(payload), "/v1beta/interactions", "")
 }
 
 // === Engine-level tests ===
@@ -719,52 +719,84 @@ func TestPromptRules_BoundaryMode_BlockArrayContentAbsent_PrependsBlock(t *testi
 	}
 }
 
-// === gemini-cli rooted under request.* ===
+// === Google Interactions ===
 
-func TestPromptRules_GeminiCLI_Inject_System_NestedRequest(t *testing.T) {
-	withPromptRules(t, []config.PromptRule{{
-		Name: "sys", Enabled: true, Target: "system", Action: "inject",
-		Content: "JSON.",
-	}})
-	in := `{"request":{"systemInstruction":{"role":"system","parts":[{"text":"You are helpful."}]},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`
-	out := applyGeminiCLI(in)
-	parts := gjson.GetBytes(out, "request.systemInstruction.parts").Array()
-	if len(parts) != 2 {
-		t.Fatalf("expected systemInstruction under request.* to gain a part; got %d in %s", len(parts), string(out))
+func TestPromptRules_Interactions_InjectSystemShapes(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		path    string
+		want    string
+		partLen int
+	}{
+		{name: "missing", input: `{"input":"hi"}`, path: "system_instruction", want: "JSON."},
+		{name: "string", input: `{"system_instruction":"Be brief.","input":"hi"}`, path: "system_instruction", want: "Be brief.JSON."},
+		{name: "text object", input: `{"system_instruction":{"text":"Be brief."},"input":"hi"}`, path: "system_instruction.text", want: "Be brief.JSON."},
+		{name: "parts", input: `{"system_instruction":{"parts":[{"text":"Be brief."}]},"input":"hi"}`, path: "system_instruction.parts.1.text", want: "JSON.", partLen: 2},
 	}
-	if parts[1].Get("text").String() != "JSON." {
-		t.Fatalf("unexpected appended part: %s", parts[1].Raw)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			withPromptRules(t, []config.PromptRule{{
+				Name: "sys", Enabled: true, Target: "system", Action: "inject", Content: "JSON.",
+			}})
+			out := applyInteractions(tt.input)
+			if got := gjson.GetBytes(out, tt.path).String(); got != tt.want {
+				t.Fatalf("%s = %q, want %q; payload=%s", tt.path, got, tt.want, out)
+			}
+			if tt.partLen > 0 && len(gjson.GetBytes(out, "system_instruction.parts").Array()) != tt.partLen {
+				t.Fatalf("system parts = %s, want %d entries", gjson.GetBytes(out, "system_instruction.parts").Raw, tt.partLen)
+			}
+		})
 	}
 }
 
-func TestPromptRules_GeminiCLI_Inject_LastUser_NestedRequest(t *testing.T) {
-	withPromptRules(t, []config.PromptRule{{
-		Name: "user", Enabled: true, Target: "user", Action: "inject",
-		Content: "done",
-	}})
-	in := `{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`
-	out := applyGeminiCLI(in)
-	parts := gjson.GetBytes(out, "request.contents.0.parts").Array()
-	if len(parts) != 2 {
-		t.Fatalf("expected user parts to gain a text part; got %d in %s", len(parts), string(out))
+func TestPromptRules_Interactions_InjectLastNaturalUserShapes(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		path  string
+		want  string
+	}{
+		{name: "string", input: `{"input":"hi"}`, path: "input", want: "hi done"},
+		{name: "content blocks", input: `{"input":[{"type":"user_input","content":[{"type":"text","text":"hi"},{"type":"image","data":"abc"}]}]}`, path: "input.0.content.2.text", want: " done"},
+		{name: "native parts", input: `{"input":[{"role":"user","parts":[{"text":"hi"},{"inline_data":{"mime_type":"image/png","data":"abc"}}]}]}`, path: "input.0.parts.2.text", want: " done"},
+		{name: "nested steps", input: `{"input":{"role":"user","steps":[{"type":"user_input","content":"first"},{"type":"model_output","content":"answer"},{"type":"function_result","result":{"ok":true}},{"type":"user_input","content":"last"}]}}`, path: "input.steps.3.content", want: "last done"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			withPromptRules(t, []config.PromptRule{{
+				Name: "user", Enabled: true, Target: "user", Action: "inject", Content: " done",
+			}})
+			out := applyInteractions(tt.input)
+			if got := gjson.GetBytes(out, tt.path).String(); got != tt.want {
+				t.Fatalf("%s = %q, want %q; payload=%s", tt.path, got, tt.want, out)
+			}
+		})
 	}
 }
 
-// Plain "gemini" must NOT touch request.* — confirms the two formats are
-// dispatched to different handlers.
-func TestPromptRules_PlainGemini_DoesNotTouchNestedRequest(t *testing.T) {
+func TestPromptRules_Interactions_StripAndProtocolScope(t *testing.T) {
 	withPromptRules(t, []config.PromptRule{{
-		Name: "sys", Enabled: true, Target: "system", Action: "inject",
-		Content: "hi",
+		Name: "strip", Enabled: true, Models: []config.PayloadModelRule{{Name: "*", Protocol: "interactions"}},
+		Target: "user", Action: "strip", Pattern: `secret-?`,
 	}})
-	in := `{"request":{"systemInstruction":{"role":"system","parts":[{"text":"x"}]}}}`
-	out := applyGemini(in)
-	nestedParts := gjson.GetBytes(out, "request.systemInstruction.parts").Array()
-	if len(nestedParts) != 1 {
-		t.Fatalf("plain gemini handler must not modify request.systemInstruction; got %d parts", len(nestedParts))
+	out := applyInteractions(`{"input":[{"type":"user_input","content":["secret-one",{"type":"text","text":"secret-two"}]}]}`)
+	if got := gjson.GetBytes(out, "input.0.content.0").String(); got != "one" {
+		t.Fatalf("string content = %q, want one", got)
 	}
-	if !gjson.GetBytes(out, "systemInstruction").Exists() {
-		t.Fatalf("plain gemini handler should have created top-level systemInstruction; got %s", string(out))
+	if got := gjson.GetBytes(out, "input.0.content.1.text").String(); got != "two" {
+		t.Fatalf("text content = %q, want two", got)
+	}
+}
+
+func TestPromptRules_GeminiCLISourceIsPassThrough(t *testing.T) {
+	withPromptRules(t, []config.PromptRule{{
+		Name: "sys", Enabled: true, Target: "system", Action: "inject", Content: "hi",
+	}})
+	in := `{"request":{"systemInstruction":{"parts":[{"text":"x"}]}}}`
+	out := ApplyPromptRules("gemini-cli", "gemini-3-pro", []byte(in), "/v1internal:generateContent", "")
+	if string(out) != in {
+		t.Fatalf("removed source protocol must pass through; got %s", out)
 	}
 }
 
@@ -1009,7 +1041,7 @@ func TestHasAdjacentContent_MultiByteUTF8(t *testing.T) {
 	// "X 日本 hello Y": marker is the multi-byte CJK string, content is ASCII.
 	// strings.Index works on bytes, and the adjacency check must respect that
 	// length math without truncating in the middle of a code point.
-	const marker = "日本"      // 6 bytes
+	const marker = "日本"        // 6 bytes
 	const text = "X 日本hello Y" // marker followed immediately by "hello"
 	if !hasAdjacentContent(text, "hello", marker, "append") {
 		t.Fatalf("multi-byte marker adjacency: expected match")

@@ -9,23 +9,11 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
-// TestService_ConfigSnapshot_RaceFree pins the BLOCKER #1 invariant from
-// the Codex Phase C round-6 review: helpers that read s.cfg
-// (ensureExecutorsForAuthWithMode, registerModelsForAuth,
-// resolveConfig*Key, oauthExcludedModels) must observe a consistent
-// snapshot even while buildReloadCallback's cfgMu.Lock writer races
-// them. Phase C #23 routed mgmt commits through buildReloadCallback so
-// this race is now triggered per-mgmt-PUT, not just on rare file-watcher
-// events.
-//
-// The test runs under go test -race and exercises the helpers
-// concurrently with a writer that swaps s.cfg under cfgMu.Lock. The
-// helpers each go through configSnapshot() (cfgMu.RLock) at function
-// entry so the race detector should report no races. Without the
-// snapshot pattern this would surface a write-vs-direct-read race on
-// s.cfg.
+// TestService_ConfigSnapshot_RaceFree covers complete executor and model
+// registration operations while hot reload publishes new immutable configs.
 func TestService_ConfigSnapshot_RaceFree(t *testing.T) {
 	s := &Service{
+		coreManager: coreauth.NewManager(nil, nil, nil),
 		cfg: &config.Config{
 			ClaudeKey: []config.ClaudeKey{
 				{APIKey: "key-A", BaseURL: "https://a.example.com"},
@@ -42,6 +30,9 @@ func TestService_ConfigSnapshot_RaceFree(t *testing.T) {
 			OAuthExcludedModels: map[string][]string{
 				"claude": {"claude-old-model"},
 			},
+			OpenAICompatibility: []config.OpenAICompatibility{{
+				Name: "compat", Models: []config.OpenAICompatibilityModel{{Name: "model-a"}},
+			}},
 		},
 	}
 
@@ -55,19 +46,29 @@ func TestService_ConfigSnapshot_RaceFree(t *testing.T) {
 			"base_url":  "https://a.example.com",
 		},
 	}
+	compatAuth := &coreauth.Auth{
+		ID:       "compat-auth",
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"auth_kind":    "apikey",
+			"compat_name":  "compat",
+			"provider_key": "compat",
+		},
+	}
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 
-	// Reader pool: drive each helper that previously read s.cfg directly.
-	// Each helper takes a configSnapshot() at entry and operates on the
-	// snapshot, so concurrent writers are race-free.
 	readers := []func(){
-		func() { _ = resolveConfigClaudeKey(s.configSnapshot(), auth) },
-		func() { _ = resolveConfigGeminiKey(s.configSnapshot(), auth) },
-		func() { _ = resolveConfigVertexCompatKey(s.configSnapshot(), auth) },
-		func() { _ = resolveConfigCodexKey(s.configSnapshot(), auth) },
-		func() { _ = s.oauthExcludedModels(s.configSnapshot(), "claude", "oauth") },
+		func() { _ = s.resolveConfigClaudeKey(auth) },
+		func() { _ = s.resolveConfigGeminiKey(auth) },
+		func() { _ = s.resolveConfigVertexCompatKey(auth) },
+		func() { _ = s.resolveConfigCodexKey(auth) },
+		func() { _ = s.oauthExcludedModels("claude", "oauth") },
+		func() { s.registerExecutorsForAuths([]*coreauth.Auth{auth, compatAuth}, true) },
+		func() { s.registerModelsForAuth(nil, auth) },
+		func() { s.registerModelsForAuth(nil, compatAuth) },
+		func() { _ = s.hasNativeOpenAICompatExecutorConfig(compatAuth, "compat") },
 	}
 	for i := 0; i < 4; i++ {
 		for _, fn := range readers {
@@ -87,8 +88,6 @@ func TestService_ConfigSnapshot_RaceFree(t *testing.T) {
 		}
 	}
 
-	// Writer: swap s.cfg under cfgMu.Lock (mirrors buildReloadCallback's
-	// final write at line 525-527 of service.go after a hot-reload).
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -119,6 +118,10 @@ func TestService_ConfigSnapshot_RaceFree(t *testing.T) {
 					OAuthExcludedModels: map[string][]string{
 						"claude": {"claude-" + suffix + "-model"},
 					},
+					SDKConfig: config.SDKConfig{ForceModelPrefix: flip},
+					OpenAICompatibility: []config.OpenAICompatibility{{
+						Name: "compat", Models: []config.OpenAICompatibilityModel{{Name: "model-" + suffix}},
+					}},
 				}
 				s.cfgMu.Lock()
 				s.cfg = newCfg
@@ -130,4 +133,26 @@ func TestService_ConfigSnapshot_RaceFree(t *testing.T) {
 	time.Sleep(80 * time.Millisecond)
 	close(stop)
 	wg.Wait()
+}
+
+func TestBuilderClonesRuntimeConfig(t *testing.T) {
+	source := &config.Config{
+		AuthDir:   t.TempDir(),
+		SDKConfig: config.SDKConfig{ForceModelPrefix: true},
+		ClaudeKey: []config.ClaudeKey{{APIKey: "source-key"}},
+	}
+	service, err := NewBuilder().WithConfig(source).WithConfigPath(t.TempDir() + "/config.yaml").Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	source.ForceModelPrefix = false
+	source.ClaudeKey[0].APIKey = "mutated-key"
+	snapshot := service.configSnapshot()
+	if snapshot == source {
+		t.Fatal("runtime config shares the caller's pointer")
+	}
+	if !snapshot.ForceModelPrefix || snapshot.ClaudeKey[0].APIKey != "source-key" {
+		t.Fatalf("runtime config changed with caller mutation: %+v", snapshot)
+	}
 }

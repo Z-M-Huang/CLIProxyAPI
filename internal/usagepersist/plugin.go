@@ -26,6 +26,7 @@ func SetStore(next *usagestore.Store) {
 	storeMu.Lock()
 	store = next
 	storeMu.Unlock()
+	usage.SetInMemoryStatisticsEnabled(next == nil)
 }
 
 type plugin struct{}
@@ -62,15 +63,21 @@ func (p *plugin) HandleUsage(ctx context.Context, record coreusage.Record) {
 		Failed:      failed,
 		LatencyMS:   normaliseLatency(record.Latency),
 		Tokens: usagestore.TokenStats{
-			InputTokens:     record.Detail.InputTokens,
-			OutputTokens:    record.Detail.OutputTokens,
-			ReasoningTokens: record.Detail.ReasoningTokens,
-			CachedTokens:    record.Detail.CachedTokens,
-			TotalTokens:     record.Detail.TotalTokens,
+			InputTokens:         record.Detail.InputTokens,
+			OutputTokens:        record.Detail.OutputTokens,
+			ReasoningTokens:     record.Detail.ReasoningTokens,
+			CachedTokens:        record.Detail.CachedTokens,
+			CacheReadTokens:     record.Detail.CacheReadTokens,
+			CacheCreationTokens: record.Detail.CacheCreationTokens,
+			TotalTokens:         record.Detail.TotalTokens,
 		},
 	})
 	if _, err := current.InsertUsageEvent(context.Background(), event); err != nil {
 		log.WithError(err).Warn("failed to persist usage event")
+		return
+	}
+	if _, err := current.PruneUsageEventsIfDue(context.Background(), time.Now().UTC()); err != nil {
+		log.WithError(err).Warn("failed to prune retained usage events")
 	}
 }
 

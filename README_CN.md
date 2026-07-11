@@ -2,13 +2,13 @@
 
 [English](README.md) | 中文 | [日本語](README_JA.md)
 
-> **分叉说明。** 本仓库是 [Z-M-Huang](https://github.com/Z-M-Huang) 维护的 [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 分叉，附带额外功能（当前：**提示规则** — 出站请求的内容级注入/剥离；恢复版日志支持计划在 v0.2.0 上线），并以 `zhironghuang/cli-proxy-api` 重新发布 Docker 镜像。会定期合并上游改进。原始项目请访问上方链接。
+> **分叉说明。** 本仓库是 [Z-M-Huang](https://github.com/Z-M-Huang) 维护的 [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 分叉，增加了提示规则、SQLite 使用量/请求历史持久化和可配置的提供商请求头，并以 `zhironghuang/cli-proxy-api` 重新发布 Docker 镜像。会定期合并上游改进。原始项目请访问上方链接。
 
-一个为 CLI 提供 OpenAI/Gemini/Claude/Codex 兼容 API 接口的代理服务器。
+一个为 CLI 提供 OpenAI/Gemini/Claude/Codex/Grok 兼容 API 接口的代理服务器。
 
 现已支持通过 OAuth 登录接入 OpenAI Codex（GPT 系列）和 Claude Code。
 
-您可以使用本地或多账户的CLI方式，通过任何与 OpenAI（包括Responses）/Gemini/Claude 兼容的客户端和SDK进行访问。
+您可以使用本地或多账户方式，通过兼容 OpenAI（包括 Responses）、Gemini、Claude 和 Grok 的客户端与 SDK 进行访问。
 
 ## 赞助说明
 
@@ -16,19 +16,20 @@
 
 ## 功能特性
 
-- 为 CLI 模型提供 OpenAI/Gemini/Claude/Codex 兼容的 API 端点
+- 为 CLI 模型提供 OpenAI/Gemini/Claude/Codex/Grok 兼容的 API 端点
 - 新增 OpenAI Codex（GPT 系列）支持（OAuth 登录）
 - 新增 Claude Code 支持（OAuth 登录）
-- 支持流式与非流式响应
+- 新增 Grok Build 支持（OAuth 登录）
+- 在提供商支持时提供流式、非流式和 WebSocket 响应
 - 函数调用/工具支持
-- 多模态输入（文本、图片）
-- 多账户支持与轮询负载均衡（Gemini、OpenAI、Claude）
-- 简单的 CLI 身份验证流程（Gemini、OpenAI、Claude）
+- 多模态输入（包括提供商支持的图片和视频）
+- 多账户支持与轮询负载均衡
+- 支持用于路由、身份验证、执行和请求/响应拦截的动态原生插件
 - 支持 Gemini AIStudio API 密钥
 - 支持 AI Studio Build 多账户轮询
-- 支持 Gemini CLI 多账户轮询
 - 支持 Claude Code 多账户轮询
 - 支持 OpenAI Codex 多账户轮询
+- 支持 Grok Build 多账户轮询
 - 通过配置接入上游 OpenAI 兼容提供商（例如 OpenRouter）
 - 提示规则：在转发到上游前向系统提示或最近的用户消息注入常驻指令，或按正则剥离不需要的样板文本；按模型与来源格式过滤，跨请求保持幂等
 - 可复用的 Go SDK（见 `docs/sdk-usage_CN.md`）
@@ -43,14 +44,15 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 
 ## 使用量统计
 
-本分叉恢复了上游在 v6.10.0 中移除的内存使用量统计，并为每条记录新增了 `request_id` 字段，用于关联磁盘上的逐请求日志文件。统计数据展示在管理界面的"使用量"标签页中，并通过以下管理 API 暴露：
+本分叉恢复了上游在 v6.10.0 中移除的使用量统计，并将使用量事件与逐请求历史持久化到 SQLite。每条记录包含 `request_id`，管理界面可据此关联请求详情。
 
-- `GET /v0/management/usage` — 当前快照
-- `GET /v0/management/usage/export` — 备份/迁移
+- `GET /v0/management/usage` 和 `GET /v0/management/usage/overview` — 从持久化的 15 分钟汇总中读取统计快照
+- `GET /v0/management/usage/events` — 按条件分页查询请求级事件
+- `GET /v0/management/usage/export` — 导出保留期内的请求级备份/迁移快照
 - `POST /v0/management/usage/import` — 从导出快照恢复
-- `GET /v0/management/request-log-by-id/:id` — 获取逐请求日志文件（被"请求事件详情"模态框使用）
+- `GET /v0/management/request-log-by-id/:id` — 获取持久化的逐请求历史
 
-如需在内存存储之外进行外部持久化（如 SQLite、更长保留期），可选用这些独立项目来消费管理 API：
+`usage-statistics-enabled` 控制事件记录，`request-log` 控制完整请求/响应历史，`usage-database-path` 控制数据库路径（默认 `./data/usage.sqlite`），`usage-event-retention-days` 控制请求级事件的保留天数（`0` 表示永久保留）。清理请求级事件后，汇总数据和去重键仍会保留，因此看板总量不会回退；事件列表和导出仅包含保留期内的请求。Docker Compose 会挂载 `./data`，因此容器重建后数据仍会保留。`logging-to-file` 仍仅用于轮转应用日志。
 
 ### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
 
@@ -63,25 +65,6 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 ### [CPA-Manager](https://github.com/seakee/CPA-Manager)
 
 面向 CLIProxyAPI 的完整管理中心，提供请求级监控和费用预估。CPA-Manager 可按账号、模型、渠道、延迟、状态和 token 用量追踪采集到的请求；支持可编辑模型价格与一键同步 LiteLLM 价格来估算费用；用 SQLite 持久化事件；并提供面向 Codex 账号池的批量巡检、配额识别、异常账号定位、清理建议与一键执行能力，适合多账号池的日常运维管理。
-
-## Amp CLI 支持
-
-CLIProxyAPI 已内置对 [Amp CLI](https://ampcode.com) 和 Amp IDE 扩展的支持，可让你使用自己的 Google/ChatGPT/Claude OAuth 订阅来配合 Amp 编码工具：
-
-- 提供商路由别名，兼容 Amp 的 API 路径模式（`/api/provider/{provider}/v1...`）
-- 管理代理，处理 OAuth 认证和账号功能
-- 智能模型回退与自动路由
-- 以安全为先的设计，管理端点仅限 localhost
-
-当你需要某一类后端的请求/响应协议形态时，优先使用 provider-specific 路径，而不是合并后的 `/v1/...` 端点：
-
-- 对于 messages 风格的后端，使用 `/api/provider/{provider}/v1/messages`。
-- 对于按模型路径暴露生成接口的后端，使用 `/api/provider/{provider}/v1beta/models/...`。
-- 对于 chat-completions 风格的后端，使用 `/api/provider/{provider}/v1/chat/completions`。
-
-这些路径有助于选择协议表面，但当多个后端复用同一个客户端可见模型名时，它们本身并不能保证唯一的推理执行器。实际的推理路由仍然根据请求里的 model/alias 解析。若要严格钉住某个后端，请使用唯一 alias、前缀，或避免让多个后端暴露相同的客户端模型名。
-
-**→ [Amp CLI 完整集成指南](https://help.router-for.me/cn/agent-client/amp-cli.html)**
 
 ## SDK 文档
 

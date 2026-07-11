@@ -220,7 +220,7 @@ func TestManager_RefreshAuth_SuccessResetsFailureCounter(t *testing.T) {
 	if got == nil {
 		t.Fatalf("auth disappeared from manager")
 	}
-	if got.NextRefreshAfter.Before(before.Add(refreshFailureBackoff - time.Second)) ||
+	if got.NextRefreshAfter.Before(before.Add(refreshFailureBackoff-time.Second)) ||
 		got.NextRefreshAfter.After(after.Add(refreshFailureBackoff+time.Second)) {
 		t.Fatalf("first failure after success: NextRefreshAfter=%s, want ~%s in future",
 			got.NextRefreshAfter, refreshFailureBackoff)

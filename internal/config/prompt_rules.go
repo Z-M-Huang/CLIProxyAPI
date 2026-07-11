@@ -50,7 +50,7 @@ type PromptRule struct {
 	Enabled bool `yaml:"enabled" json:"enabled"`
 	// Models scopes the rule. Empty list means match all models and source formats.
 	// Reuses PayloadModelRule; the Protocol field here means SOURCE format (e.g.,
-	// "openai", "openai-response", "claude", "gemini", "gemini-cli").
+	// "openai", "openai-response", "claude", "gemini", "interactions").
 	Models []PayloadModelRule `yaml:"models,omitempty" json:"models,omitempty"`
 	// Target is "system" or "user".
 	Target string `yaml:"target" json:"target"`
@@ -195,7 +195,11 @@ func normalizePromptRule(r PromptRule) PromptRule {
 	}
 	for j := range r.Models {
 		r.Models[j].Name = strings.TrimSpace(r.Models[j].Name)
-		r.Models[j].Protocol = strings.ToLower(strings.TrimSpace(r.Models[j].Protocol))
+		protocol := strings.ToLower(strings.TrimSpace(r.Models[j].Protocol))
+		if protocol == "gemini-cli" {
+			protocol = "interactions"
+		}
+		r.Models[j].Protocol = protocol
 	}
 	return r
 }

@@ -3,8 +3,23 @@ package executor
 import (
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/tidwall/gjson"
 )
+
+func TestKimiUserAgentDefaultFromConfig(t *testing.T) {
+	if got := kimiUserAgent(&config.Config{}); got != "KimiCLI/1.10.6" {
+		t.Fatalf("kimiUserAgent default = %q, want KimiCLI/1.10.6", got)
+	}
+	cfg := &config.Config{
+		KimiHeaderDefaults: config.KimiHeaderDefaults{
+			UserAgent: "custom-kimi/1.0",
+		},
+	}
+	if got := kimiUserAgent(cfg); got != "custom-kimi/1.0" {
+		t.Fatalf("kimiUserAgent configured = %q, want custom-kimi/1.0", got)
+	}
+}
 
 func TestNormalizeKimiToolMessageLinks_UsesCallIDFallback(t *testing.T) {
 	body := []byte(`{
