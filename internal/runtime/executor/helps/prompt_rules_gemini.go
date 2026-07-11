@@ -9,11 +9,6 @@ import (
 )
 
 // geminiPromptFmt implements prompt-rule mutations for the Gemini source format.
-// rootPrefix differentiates plain "gemini" (rootPrefix="") from "gemini-cli"
-// (rootPrefix="request") — the gemini-cli source format wraps the entire Gemini
-// request shape under a top-level "request" object, which is verified at the
-// translator/gemini-cli/* and runtime/executor/gemini_cli_executor.go path
-// usages (e.g., request.systemInstruction, request.contents).
 //
 // The system prompt lives in either systemInstruction (camelCase, used by
 // OpenAI→Gemini and most clients) OR system_instruction (snake_case, used by
@@ -34,8 +29,6 @@ const (
 )
 
 // prefixedPath joins the format's optional root prefix with a relative path.
-// e.g., for gemini-cli with rootPrefix="request" and rel="systemInstruction",
-// returns "request.systemInstruction". For plain gemini, returns rel unchanged.
 func (g *geminiPromptFmt) prefixedPath(rel string) string {
 	if g.rootPrefix == "" {
 		return rel

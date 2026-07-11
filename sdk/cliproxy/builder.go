@@ -213,13 +213,15 @@ func (b *Builder) Build() (*Service, error) {
 		accessManager = sdkaccess.NewManager()
 	}
 
-	configaccess.Register(&b.cfg.SDKConfig)
+	// FORK[config-snapshot]: isolate the service from caller mutations after Build returns.
+	runtimeCfg := b.cfg.CloneForRuntime()
+	configaccess.Register(&runtimeCfg.SDKConfig)
 	pluginHost := b.pluginHost
 	if pluginHost == nil {
 		pluginHost = pluginhost.New()
 	}
-	if b.cfg != nil {
-		pluginHost.ApplyConfig(context.Background(), b.cfg)
+	if runtimeCfg != nil {
+		pluginHost.ApplyConfig(context.Background(), runtimeCfg)
 		pluginHost.RegisterFrontendAuthProviders()
 	}
 	accessManager.SetProviders(sdkaccess.RegisteredProviders())
@@ -227,18 +229,18 @@ func (b *Builder) Build() (*Service, error) {
 	coreManager := b.coreManager
 	if coreManager == nil {
 		tokenStore := sdkAuth.GetTokenStore()
-		if dirSetter, ok := tokenStore.(interface{ SetBaseDir(string) }); ok && b.cfg != nil {
-			dirSetter.SetBaseDir(b.cfg.AuthDir)
+		if dirSetter, ok := tokenStore.(interface{ SetBaseDir(string) }); ok && runtimeCfg != nil {
+			dirSetter.SetBaseDir(runtimeCfg.AuthDir)
 		}
 
 		strategy := ""
 		sessionAffinity := false
 		sessionAffinityTTL := time.Hour
-		if b.cfg != nil {
-			strategy = strings.ToLower(strings.TrimSpace(b.cfg.Routing.Strategy))
+		if runtimeCfg != nil {
+			strategy = strings.ToLower(strings.TrimSpace(runtimeCfg.Routing.Strategy))
 			// Support both legacy ClaudeCodeSessionAffinity and new universal SessionAffinity
-			sessionAffinity = b.cfg.Routing.SessionAffinity
-			if ttlStr := strings.TrimSpace(b.cfg.Routing.SessionAffinityTTL); ttlStr != "" {
+			sessionAffinity = runtimeCfg.Routing.SessionAffinity
+			if ttlStr := strings.TrimSpace(runtimeCfg.Routing.SessionAffinityTTL); ttlStr != "" {
 				if parsed, err := time.ParseDuration(ttlStr); err == nil && parsed > 0 {
 					sessionAffinityTTL = parsed
 				}
@@ -264,14 +266,14 @@ func (b *Builder) Build() (*Service, error) {
 	}
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
-	coreManager.SetConfig(b.cfg)
-	coreManager.SetOAuthModelAlias(b.cfg.OAuthModelAlias)
+	coreManager.SetConfig(runtimeCfg)
+	coreManager.SetOAuthModelAlias(runtimeCfg.OAuthModelAlias)
 	if pluginHost != nil {
 		coreManager.SetPluginScheduler(pluginHost)
 	}
 
 	service := &Service{
-		cfg:            b.cfg,
+		cfg:            runtimeCfg,
 		configPath:     b.configPath,
 		tokenProvider:  tokenProvider,
 		apiKeyProvider: apiKeyProvider,
@@ -289,8 +291,8 @@ func (b *Builder) Build() (*Service, error) {
 	service.serverOptions = append(service.serverOptions,
 		api.WithPostAuthPersistHook(service.runtimeAuthSyncHook()),
 		api.WithPluginHost(pluginHost),
-		api.WithConfigReloadHook(func(ctx context.Context, cfg *config.Config) {
-			service.applyConfigUpdate(cfg)
+		api.WithConfigReloadHook(func(_ context.Context, _ *config.Config) {
+			service.reloadConfigFromWatcher()
 		}),
 	)
 	return service, nil

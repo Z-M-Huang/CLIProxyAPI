@@ -104,7 +104,7 @@ func loadPromptRulesSnapshot() *promptRulesSnapshot {
 //
 // sourceFormat is the inbound request's protocol identifier (the value of
 // BaseAPIHandler.HandlerType()): "openai", "openai-response", "claude",
-// "gemini", or "gemini-cli". Unknown formats are pass-through.
+// "gemini", or "interactions". Unknown formats are pass-through.
 //
 // The function reads from a package-level atomic snapshot; callers do not need
 // to thread *config.Config through to the handler chokepoint.
@@ -214,14 +214,14 @@ var (
 	openaiResponsePromptHandler promptHandler = &openaiResponsePromptFmt{}
 	claudePromptHandler         promptHandler = &claudePromptFmt{}
 	geminiPromptHandler         promptHandler = newGeminiPromptFmt("")
-	geminiCLIPromptHandler      promptHandler = newGeminiPromptFmt("request")
+	interactionsPromptHandler   promptHandler = &interactionsPromptFmt{}
 )
 
 // AllowedPromptRuleProtocols is the canonical set of source-format strings that
 // PromptRule.Models[].Protocol may scope to. Used by config validation and
 // kept in lockstep with the dispatch table below — no aliases.
 var AllowedPromptRuleProtocols = []string{
-	"openai", "openai-response", "claude", "gemini", "gemini-cli",
+	"openai", "openai-response", "claude", "gemini", "interactions",
 }
 
 // IsAllowedPromptRuleProtocol returns true when p is an empty string ("any
@@ -248,8 +248,8 @@ func promptHandlerForSourceFormat(sourceFormat string) promptHandler {
 		return claudePromptHandler
 	case "gemini":
 		return geminiPromptHandler
-	case "gemini-cli":
-		return geminiCLIPromptHandler
+	case "interactions":
+		return interactionsPromptHandler
 	default:
 		return nil
 	}
@@ -360,7 +360,7 @@ func blockArrayInject(payload []byte, path string, isTextBlock func(gjson.Result
 	blocks := arr.Array()
 	if marker == "" {
 		for _, b := range blocks {
-			if isTextBlock(b) && strings.Contains(b.Get("text").String(), content) {
+			if isTextBlock(b) && strings.Contains(promptBlockText(b), content) {
 				return payload
 			}
 		}
@@ -382,7 +382,7 @@ func blockArrayInject(payload []byte, path string, isTextBlock func(gjson.Result
 		if !isTextBlock(b) {
 			continue
 		}
-		text := b.Get("text").String()
+		text := promptBlockText(b)
 		if !strings.Contains(text, marker) {
 			continue
 		}
@@ -396,16 +396,27 @@ func blockArrayInject(payload []byte, path string, isTextBlock func(gjson.Result
 	if firstIdx < 0 {
 		return payload
 	}
-	text := blocks[firstIdx].Get("text").String()
+	text := promptBlockText(blocks[firstIdx])
 	newText, mutated := injectIntoText(text, content, marker, position)
 	if !mutated {
 		return payload
 	}
-	updated, err := sjson.SetBytes(payload, fmt.Sprintf("%s.%d.text", path, firstIdx), newText)
+	targetPath := fmt.Sprintf("%s.%d.text", path, firstIdx)
+	if blocks[firstIdx].Type == gjson.String {
+		targetPath = fmt.Sprintf("%s.%d", path, firstIdx)
+	}
+	updated, err := sjson.SetBytes(payload, targetPath, newText)
 	if err != nil {
 		return payload
 	}
 	return updated
+}
+
+func promptBlockText(block gjson.Result) string {
+	if block.Type == gjson.String {
+		return block.String()
+	}
+	return block.Get("text").String()
 }
 
 // prependArrayElement inserts rawElement at index 0 of the JSON array at path.

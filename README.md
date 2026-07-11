@@ -2,13 +2,13 @@
 
 English | [中文](README_CN.md) | [日本語](README_JA.md)
 
-> **Fork notice.** This is [Z-M-Huang's](https://github.com/Z-M-Huang) fork of [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). It carries extra features (currently: **Prompt Rules** — content-level inject/strip on outgoing requests; revived logging support is planned for v0.2.0) and republishes the docker image at `zhironghuang/cli-proxy-api`. Upstream improvements are merged in periodically. For the original project, follow the upstream link.
+> **Fork notice.** This is [Z-M-Huang's](https://github.com/Z-M-Huang) fork of [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). It adds Prompt Rules, persistent SQLite usage/request history, and configurable provider headers, and republishes the Docker image as `zhironghuang/cli-proxy-api`. Upstream improvements are merged periodically. For the original project, follow the upstream link.
 
-A proxy server that provides OpenAI/Gemini/Claude/Codex compatible API interfaces for CLI.
+A proxy server that provides OpenAI/Gemini/Claude/Codex/Grok compatible API interfaces for CLI.
 
 It now also supports OpenAI Codex (GPT models) and Claude Code via OAuth.
 
-So you can use local or multi-account CLI access with OpenAI(include Responses)/Gemini/Claude-compatible clients and SDKs.
+So you can use local or multi-account access with OpenAI (including Responses), Gemini, Claude, and Grok-compatible clients and SDKs.
 
 ## Sponsorship
 
@@ -16,20 +16,20 @@ This fork does not solicit or accept sponsorships. The original project ([router
 
 ## Overview
 
-- OpenAI/Gemini/Claude compatible API endpoints for CLI models
+- OpenAI/Gemini/Claude/Grok compatible API endpoints for CLI models
 - OpenAI Codex support (GPT models) via OAuth login
 - Claude Code support via OAuth login
-- Amp CLI and IDE extensions support with provider routing
-- Streaming and non-streaming responses
+- Grok Build support via OAuth login
+- Streaming, non-streaming, and WebSocket responses where supported
 - Function calling/tools support
-- Multimodal input support (text and images)
-- Multiple accounts with round-robin load balancing (Gemini, OpenAI, Claude)
-- Simple CLI authentication flows (Gemini, OpenAI, Claude)
+- Multimodal input support, including images and video where supported
+- Multiple accounts with round-robin load balancing
+- Dynamic native plugins for routing, auth, execution, and request/response interception
 - Generative Language API Key support
 - AI Studio Build multi-account load balancing
-- Gemini CLI multi-account load balancing
 - Claude Code multi-account load balancing
 - OpenAI Codex multi-account load balancing
+- Grok Build multi-account load balancing
 - OpenAI-compatible upstream providers via config (e.g., OpenRouter)
 - Prompt Rules: inject standing instructions into outgoing system prompts or last user messages, or strip unwanted boilerplate (regex), scoped by model and source format and idempotent across requests
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
@@ -46,9 +46,9 @@ see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
 
 This fork restores the usage tracking that upstream removed in v6.10.0 and persists it to SQLite. Each usage row includes `request_id` so the management UI can correlate usage events with persisted request histories.
 
-- `GET /v0/management/usage` — current snapshot
-- `GET /v0/management/usage/events` — paginated persisted events
-- `GET /v0/management/usage/export` — backup/migration
+- `GET /v0/management/usage` and `GET /v0/management/usage/overview` — aggregate snapshot from durable 15-minute rollups
+- `GET /v0/management/usage/events` — filtered, paginated request-level events
+- `GET /v0/management/usage/export` — retained request-level backup/migration snapshot
 - `POST /v0/management/usage/import` — restore from a previous export
 - `GET /v0/management/request-log-by-id/:id` — fetch the persisted per-request history (used by the Request Event Detail modal)
 
@@ -57,6 +57,9 @@ Persistent storage is controlled by:
 - `usage-statistics-enabled` — captures usage events when true
 - `request-log` — captures full request/response histories to SQLite when true
 - `usage-database-path` — SQLite database path, default `./data/usage.sqlite`
+- `usage-event-retention-days` — days to keep request-level events; `0` keeps them indefinitely
+
+Rollups and deduplication keys are retained after request-level event pruning, so dashboard totals remain stable. Request-event pages and exports contain only events still inside the configured raw-event retention window.
 
 When using Docker Compose, `./data` is mounted to `/CLIProxyAPI/data` so the SQLite database survives container rebuilds and restarts.
 
@@ -73,26 +76,6 @@ Local-first usage and quota dashboard for CLIProxyAPI. It consumes the Redis-com
 ### [CPA-Manager](https://github.com/seakee/CPA-Manager)
 
 Full CLIProxyAPI management center with request-level monitoring and cost estimates. CPA-Manager tracks collected requests by account, model, channel, latency, status, and token usage; estimates cost with editable model prices and one-click LiteLLM price sync; persists events in SQLite; and provides Codex account-pool operations with batch inspection, quota detection, unhealthy account discovery, cleanup suggestions, and one-click execution for day-to-day multi-account maintenance.
-
-## Amp CLI Support
-
-CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and Amp IDE extensions, enabling you to use your Google/ChatGPT/Claude OAuth subscriptions with Amp's coding tools:
-
-- Provider route aliases for Amp's API patterns (`/api/provider/{provider}/v1...`)
-- Management proxy for OAuth authentication and account features
-- Smart model fallback with automatic routing
-- **Model mapping** to route unavailable models to alternatives (e.g., `claude-opus-4.5` → `claude-sonnet-4`)
-- Security-first design with localhost-only management endpoints
-
-When you need the request/response shape of a specific backend family, use the provider-specific paths instead of the merged `/v1/...` endpoints:
-
-- Use `/api/provider/{provider}/v1/messages` for messages-style backends.
-- Use `/api/provider/{provider}/v1beta/models/...` for model-scoped generate endpoints.
-- Use `/api/provider/{provider}/v1/chat/completions` for chat-completions backends.
-
-These routes help you select the protocol surface, but they do not by themselves guarantee a unique inference executor when the same client-visible model name is reused across multiple backends. Inference routing is still resolved from the request model/alias. For strict backend pinning, use unique aliases, prefixes, or otherwise avoid overlapping client-visible model names.
-
-**→ [Complete Amp CLI Integration Guide](https://help.router-for.me/agent-client/amp-cli.html)**
 
 ## SDK Docs
 

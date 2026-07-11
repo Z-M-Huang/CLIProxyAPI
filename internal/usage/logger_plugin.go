@@ -15,10 +15,14 @@ import (
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
-var statisticsEnabled atomic.Bool
+var (
+	statisticsEnabled         atomic.Bool
+	inMemoryStatisticsEnabled atomic.Bool
+)
 
 func init() {
 	statisticsEnabled.Store(true)
+	inMemoryStatisticsEnabled.Store(true)
 	coreusage.RegisterPlugin(NewLoggerPlugin())
 }
 
@@ -41,7 +45,7 @@ func NewLoggerPlugin() *LoggerPlugin { return &LoggerPlugin{stats: defaultReques
 //   - ctx: The context for the usage record
 //   - record: The usage record to aggregate
 func (p *LoggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record) {
-	if !statisticsEnabled.Load() {
+	if !statisticsEnabled.Load() || !inMemoryStatisticsEnabled.Load() {
 		return
 	}
 	if p == nil || p.stats == nil {
@@ -55,6 +59,9 @@ func SetStatisticsEnabled(enabled bool) { statisticsEnabled.Store(enabled) }
 
 // StatisticsEnabled reports the current recording state.
 func StatisticsEnabled() bool { return statisticsEnabled.Load() }
+
+// SetInMemoryStatisticsEnabled disables the fallback collector when SQLite owns usage history.
+func SetInMemoryStatisticsEnabled(enabled bool) { inMemoryStatisticsEnabled.Store(enabled) }
 
 // RequestStatistics maintains aggregated request metrics in memory.
 type RequestStatistics struct {

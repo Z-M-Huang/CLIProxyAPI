@@ -37,6 +37,8 @@ func TestLoadConfigOptional_ProviderUserAgentHeaderDefaults(t *testing.T) {
 	configYAML := []byte(`
 gemini-cli-header-defaults:
   user-agent: "  custom-gemini-cli/1.0  "
+gemini-header-defaults:
+  user-agent: "  custom-gemini-api/2.0  "
 openai-compatibility-header-defaults:
   user-agent: "  custom-openai-compat/1.0  "
 kimi-header-defaults:
@@ -56,6 +58,9 @@ antigravity-header-defaults:
 	if got := cfg.GeminiCLIHeaderDefaults.UserAgent; got != "custom-gemini-cli/1.0" {
 		t.Fatalf("GeminiCLIHeaderDefaults.UserAgent = %q, want %q", got, "custom-gemini-cli/1.0")
 	}
+	if got := cfg.GeminiHeaderDefaults.UserAgent; got != "custom-gemini-api/2.0" {
+		t.Fatalf("GeminiHeaderDefaults.UserAgent = %q, want %q", got, "custom-gemini-api/2.0")
+	}
 	if got := cfg.OpenAICompatibilityHeaderDefaults.UserAgent; got != "custom-openai-compat/1.0" {
 		t.Fatalf("OpenAICompatibilityHeaderDefaults.UserAgent = %q, want %q", got, "custom-openai-compat/1.0")
 	}
@@ -72,6 +77,9 @@ antigravity-header-defaults:
 	}
 	if got := parsed.GeminiCLIHeaderDefaults.UserAgent; got != "custom-gemini-cli/1.0" {
 		t.Fatalf("ParseConfigBytes GeminiCLIHeaderDefaults.UserAgent = %q, want %q", got, "custom-gemini-cli/1.0")
+	}
+	if got := parsed.GeminiHeaderDefaults.UserAgent; got != "custom-gemini-api/2.0" {
+		t.Fatalf("ParseConfigBytes GeminiHeaderDefaults.UserAgent = %q, want %q", got, "custom-gemini-api/2.0")
 	}
 	if got := parsed.OpenAICompatibilityHeaderDefaults.UserAgent; got != "custom-openai-compat/1.0" {
 		t.Fatalf("ParseConfigBytes OpenAICompatibilityHeaderDefaults.UserAgent = %q, want %q", got, "custom-openai-compat/1.0")

@@ -27,8 +27,8 @@ func TestAntigravityUserAgentDefaultFromConfig(t *testing.T) {
 	if got := resolveUserAgent(cfg, nil); got != "antigravity/1.23.2 linux/x64" {
 		t.Fatalf("resolveUserAgent configured = %q, want antigravity/1.23.2 linux/x64", got)
 	}
-	if got := resolveLoadCodeAssistUserAgent(cfg, nil); got != "antigravity/1.23.2 linux/x64 google-api-nodejs-client/10.3.0" {
-		t.Fatalf("resolveLoadCodeAssistUserAgent configured = %q, want antigravity/1.23.2 linux/x64 google-api-nodejs-client/10.3.0", got)
+	if got := resolveLoadCodeAssistUserAgent(cfg, nil); got != "antigravity/1.23.2 linux/x64" {
+		t.Fatalf("resolveLoadCodeAssistUserAgent configured = %q, want antigravity/1.23.2 linux/x64", got)
 	}
 }
 
@@ -319,17 +319,20 @@ func buildRequestBodyFromPayload(t *testing.T, modelName string) map[string]any 
 							"parametersJsonSchema": {
 								"$schema": "http://json-schema.org/draft-07/schema#",
 								"$id": "root-schema",
+								"$comment": "root comment should be removed",
 								"type": "object",
 								"properties": {
 									"$id": {"type": "string"},
 									"arg": {
 										"type": "object",
+										"$comment": "nested comment should be removed",
 										"prefill": "hello",
 										"properties": {
 											"mode": {
 												"type": "string",
 												"deprecated": true,
 												"enum": ["a", "b"],
+												"enumDescriptions": ["Alpha", "Beta"],
 												"enumTitles": ["A", "B"]
 											}
 										}
@@ -408,6 +411,9 @@ func assertSchemaSanitizedAndPropertyPreserved(t *testing.T, params map[string]a
 	if _, ok := params["$id"]; ok {
 		t.Fatalf("root $id should be removed from schema")
 	}
+	if _, ok := params["$comment"]; ok {
+		t.Fatalf("root $comment should be removed from schema")
+	}
 	if _, ok := params["patternProperties"]; ok {
 		t.Fatalf("patternProperties should be removed from schema")
 	}
@@ -427,6 +433,9 @@ func assertSchemaSanitizedAndPropertyPreserved(t *testing.T, params map[string]a
 	if _, ok := arg["prefill"]; ok {
 		t.Fatalf("prefill should be removed from nested schema")
 	}
+	if _, ok := arg["$comment"]; ok {
+		t.Fatalf("nested $comment should be removed from schema")
+	}
 
 	argProps, ok := arg["properties"].(map[string]any)
 	if !ok {
@@ -438,6 +447,9 @@ func assertSchemaSanitizedAndPropertyPreserved(t *testing.T, params map[string]a
 	}
 	if _, ok := mode["enumTitles"]; ok {
 		t.Fatalf("enumTitles should be removed from nested schema")
+	}
+	if _, ok := mode["enumDescriptions"]; ok {
+		t.Fatalf("enumDescriptions should be removed from nested schema")
 	}
 	if _, ok := mode["deprecated"]; ok {
 		t.Fatalf("deprecated should be removed from nested schema")

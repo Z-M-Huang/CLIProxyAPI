@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -25,7 +24,6 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
-	"gopkg.in/yaml.v3"
 )
 
 type attemptInfo struct {
@@ -42,29 +40,35 @@ const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
-	cfgValue               *config.Config
-	cfgPtr                 atomic.Pointer[config.Config]
-	configFilePath         string
-	mu                     sync.Mutex
-	attemptsMu             sync.Mutex
-	failedAttempts         map[string]*attemptInfo // keyed by client IP
-	authManagerValue       *coreauth.Manager
-	authManagerPtr         atomic.Pointer[coreauth.Manager]
-	usageStats             *usage.RequestStatistics
-	usageStore             *usagestore.Store
-	tokenStore             coreauth.Store
-	localPassword          string
-	allowRemoteOverride    bool
-	envSecret              string
-	logDir                 string
-	postAuthHook           coreauth.PostAuthHook
-	postAuthPersistHook    coreauth.PostAuthHook
-	pluginHost             *pluginhost.Host
-	configReloadHook       func(context.Context, *config.Config)
-	pluginStoreRegistryURL string
-	pluginStoreHTTPClient  pluginstore.HTTPDoer
-	pluginReleaseCacheMu   sync.Mutex
-	pluginReleaseCache     map[string]pluginReleaseCacheEntry
+	cfg                     *config.Config
+	configFilePath          string
+	mu                      sync.Mutex
+	reloadMu                sync.Mutex
+	reloadGeneration        uint64
+	appliedReloadGeneration uint64
+	attemptsMu              sync.Mutex
+	failedAttempts          map[string]*attemptInfo // keyed by client IP
+	authManager             *coreauth.Manager
+	usageStats              *usage.RequestStatistics
+	usageStore              *usagestore.Store
+	tokenStore              coreauth.Store
+	localPassword           string
+	allowRemoteOverride     bool
+	envSecret               string
+	logDir                  string
+	postAuthHook            coreauth.PostAuthHook
+	postAuthPersistHook     coreauth.PostAuthHook
+	pluginHost              *pluginhost.Host
+	configReloadHook        func(context.Context, *config.Config)
+	pluginStoreRegistryURL  string
+	pluginStoreHTTPClient   pluginstore.HTTPDoer
+	pluginReleaseCacheMu    sync.Mutex
+	pluginReleaseCache      map[string]pluginReleaseCacheEntry
+}
+
+type configReloadSnapshot struct {
+	cfg        *config.Config
+	generation uint64
 }
 
 // NewHandler creates a new management handler instance.
@@ -73,18 +77,14 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 	envSecret = strings.TrimSpace(envSecret)
 
 	h := &Handler{
-		cfgValue:            cfg,
+		cfg:                 cfg.CloneForRuntime(),
 		configFilePath:      configFilePath,
 		failedAttempts:      make(map[string]*attemptInfo),
-		authManagerValue:    manager,
+		authManager:         manager,
 		usageStats:          usage.GetRequestStatistics(),
 		tokenStore:          sdkAuth.GetTokenStore(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
-	}
-	h.cfgPtr.Store(cfg)
-	if manager != nil {
-		h.authManagerPtr.Store(manager)
 	}
 	h.startAttemptCleanup()
 	return h
@@ -125,49 +125,13 @@ func NewHandlerWithoutConfigFilePath(cfg *config.Config, manager *coreauth.Manag
 	return NewHandler(cfg, "", manager)
 }
 
-func (h *Handler) cfg() *config.Config {
-	if h == nil {
-		return nil
-	}
-	if cfg := h.cfgPtr.Load(); cfg != nil {
-		return cfg
-	}
-	return h.cfgValue
-}
-
-func (h *Handler) authManager() *coreauth.Manager {
-	if h == nil {
-		return nil
-	}
-	if manager := h.authManagerPtr.Load(); manager != nil {
-		return manager
-	}
-	return h.authManagerValue
-}
-
-func cloneConfigSnapshot(cur *config.Config) (*config.Config, error) {
-	if cur == nil {
-		return &config.Config{}, nil
-	}
-	data, err := yaml.Marshal(cur)
-	if err != nil {
-		return nil, fmt.Errorf("clone config: marshal: %w", err)
-	}
-	var next config.Config
-	if err := yaml.Unmarshal(data, &next); err != nil {
-		return nil, fmt.Errorf("clone config: unmarshal: %w", err)
-	}
-	return &next, nil
-}
-
 // SetConfig updates the in-memory config reference when the server hot-reloads.
 func (h *Handler) SetConfig(cfg *config.Config) {
 	if h == nil {
 		return
 	}
 	h.mu.Lock()
-	h.cfgValue = cfg
-	h.cfgPtr.Store(cfg)
+	h.cfg = cfg.CloneForRuntime()
 	h.mu.Unlock()
 }
 
@@ -177,29 +141,24 @@ func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
 		return
 	}
 	h.mu.Lock()
-	h.authManagerValue = manager
-	h.authManagerPtr.Store(manager)
+	h.authManager = manager
 	h.mu.Unlock()
 }
 
-// SetUsageStatistics allows tests or embedders to replace the in-memory statistics source.
+// SetUsageStatistics allows tests and embedders to replace the in-memory statistics source.
 func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) {
 	if h == nil {
 		return
 	}
-	h.mu.Lock()
 	h.usageStats = stats
-	h.mu.Unlock()
 }
 
-// SetUsageStore wires the persistent usage/request-history store into management handlers.
+// SetUsageStore wires persistent usage and request history into management handlers.
 func (h *Handler) SetUsageStore(store *usagestore.Store) {
 	if h == nil {
 		return
 	}
-	h.mu.Lock()
 	h.usageStore = store
-	h.mu.Unlock()
 }
 
 // SetPluginHost updates the plugin host used by plugin-backed management endpoints.
@@ -222,25 +181,63 @@ func (h *Handler) SetConfigReloadHook(hook func(context.Context, *config.Config)
 	h.mu.Unlock()
 }
 
-func (h *Handler) reloadConfigAfterManagementSave(ctx context.Context, cfg *config.Config) {
-	if h == nil || cfg == nil {
+// reloadSnapshotConfigLocked clones the runtime config and assigns a reload generation.
+// Callers must hold h.mu.
+func (h *Handler) reloadSnapshotConfigLocked() configReloadSnapshot {
+	if h == nil || h.cfg == nil {
+		return configReloadSnapshot{}
+	}
+	h.reloadGeneration++
+	return configReloadSnapshot{
+		cfg:        h.cfg.CloneForRuntime(),
+		generation: h.reloadGeneration,
+	}
+}
+
+// saveConfigAndSnapshotLocked saves h.cfg and returns a full runtime config snapshot.
+// Callers must hold h.mu.
+func (h *Handler) saveConfigAndSnapshotLocked(c *gin.Context) (configReloadSnapshot, bool) {
+	if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); errSave != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", errSave)})
+		return configReloadSnapshot{}, false
+	}
+	return h.reloadSnapshotConfigLocked(), true
+}
+
+// reloadConfigAfterManagementSave reloads from an independent config snapshot.
+// Callers must pass a full Config clone captured immediately after a successful save.
+func (h *Handler) reloadConfigAfterManagementSave(ctx context.Context, snapshot configReloadSnapshot) {
+	if h == nil || snapshot.cfg == nil || snapshot.generation == 0 {
 		return
 	}
+	h.reloadMu.Lock()
+	defer h.reloadMu.Unlock()
+
 	h.mu.Lock()
+	if snapshot.generation < h.appliedReloadGeneration {
+		h.mu.Unlock()
+		return
+	}
 	hook := h.configReloadHook
 	host := h.pluginHost
 	h.mu.Unlock()
 	if hook != nil {
-		hook(ctx, cfg)
-		return
+		hook(ctx, snapshot.cfg)
+	} else if host != nil {
+		host.ApplyConfig(ctx, snapshot.cfg)
 	}
-	if host != nil {
-		host.ApplyConfig(ctx, cfg)
+
+	h.mu.Lock()
+	if snapshot.generation > h.appliedReloadGeneration {
+		h.appliedReloadGeneration = snapshot.generation
 	}
+	h.mu.Unlock()
 }
 
-func (h *Handler) reloadConfigAfterManagementSaveAsync(ctx context.Context, cfg *config.Config) {
-	if h == nil || cfg == nil {
+// reloadConfigAfterManagementSaveAsync reloads from an independent config snapshot.
+// Callers must pass a full Config clone captured immediately after a successful save.
+func (h *Handler) reloadConfigAfterManagementSaveAsync(ctx context.Context, snapshot configReloadSnapshot) {
+	if h == nil || snapshot.cfg == nil || snapshot.generation == 0 {
 		return
 	}
 	reloadCtx := context.Background()
@@ -253,7 +250,7 @@ func (h *Handler) reloadConfigAfterManagementSaveAsync(ctx context.Context, cfg 
 				log.WithField("panic", recovered).Error("management: async config reload panicked")
 			}
 		}()
-		h.reloadConfigAfterManagementSave(reloadCtx, cfg)
+		h.reloadConfigAfterManagementSave(reloadCtx, snapshot)
 	}()
 }
 
@@ -329,7 +326,7 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		return false, http.StatusForbidden, "remote management disabled"
 	}
 
-	cfg := h.cfg()
+	cfg := h.cfg
 	var (
 		allowRemote bool
 		secretHash  string
@@ -431,11 +428,17 @@ func (h *Handler) persist(c *gin.Context) bool {
 // It expects the caller to hold h.mu.
 func (h *Handler) persistLocked(c *gin.Context) bool {
 	// Preserve comments when writing
-	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg()); err != nil {
+	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
 		return false
 	}
+	snapshot := h.reloadSnapshotConfigLocked()
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	var reqCtx context.Context
+	if c != nil && c.Request != nil {
+		reqCtx = c.Request.Context()
+	}
+	h.reloadConfigAfterManagementSaveAsync(reqCtx, snapshot)
 	return true
 }
 
@@ -448,8 +451,10 @@ func (h *Handler) updateBoolField(c *gin.Context, set func(bool)) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	set(*body.Value)
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 func (h *Handler) updateIntField(c *gin.Context, set func(int)) {
@@ -460,8 +465,10 @@ func (h *Handler) updateIntField(c *gin.Context, set func(int)) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	set(*body.Value)
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
@@ -472,6 +479,8 @@ func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	set(*body.Value)
-	h.persist(c)
+	h.persistLocked(c)
 }

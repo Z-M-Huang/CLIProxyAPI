@@ -13,10 +13,10 @@ import (
 	"reflect"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -66,15 +66,6 @@ type pinnedAuthContextKey struct{}
 type selectedAuthCallbackContextKey struct{}
 type executionSessionContextKey struct{}
 type disallowFreeAuthContextKey struct{}
-type requestPathContextKey struct{}
-
-func requestPathFromContext(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-	path, _ := ctx.Value(requestPathContextKey{}).(string)
-	return path
-}
 
 // PluginInterceptorHost applies plugin interceptors around handler execution.
 type PluginInterceptorHost interface {
@@ -302,6 +293,26 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	return meta
 }
 
+func applyConfiguredPromptRules(rawJSON []byte, protocol, model string, meta map[string]any, alt string) []byte {
+	if len(rawJSON) == 0 {
+		return nil
+	}
+	requestPath, _ := meta[coreexecutor.RequestPathMetadataKey].(string)
+	// FORK[prompt-rules]: keep the raw client payload in Options while executors receive rewritten content.
+	return helps.ApplyPromptRules(protocol, model, rawJSON, strings.TrimSpace(requestPath), alt)
+}
+
+func addAuthSelectionModelMetadata(meta map[string]any, model string) {
+	if meta == nil {
+		return
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return
+	}
+	meta[coreexecutor.AuthSelectionModelMetadataKey] = model
+}
+
 func setReasoningEffortMetadata(meta map[string]any, handlerType, model string, rawJSON []byte) {
 	if meta == nil {
 		return
@@ -412,8 +423,7 @@ type BaseAPIHandler struct {
 	AuthManager *coreauth.Manager
 
 	// Cfg holds the current application configuration.
-	Cfg    *config.SDKConfig
-	cfgPtr atomic.Pointer[config.SDKConfig]
+	Cfg *config.SDKConfig
 
 	// PluginHost optionally applies plugin interceptors around upstream execution.
 	PluginHost PluginInterceptorHost
@@ -433,12 +443,10 @@ type BaseAPIHandler struct {
 // Returns:
 //   - *BaseAPIHandler: A new API handlers instance
 func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *BaseAPIHandler {
-	h := &BaseAPIHandler{
+	return &BaseAPIHandler{
 		Cfg:         cfg,
 		AuthManager: authManager,
 	}
-	h.cfgPtr.Store(cfg)
-	return h
 }
 
 // UpdateClients updates the handlers' client list and configuration.
@@ -447,23 +455,7 @@ func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *B
 // Parameters:
 //   - clients: The new slice of AI service clients
 //   - cfg: The new application configuration
-func (h *BaseAPIHandler) Config() *config.SDKConfig {
-	if h == nil {
-		return nil
-	}
-	if cfg := h.cfgPtr.Load(); cfg != nil {
-		return cfg
-	}
-	return h.Cfg
-}
-
-func (h *BaseAPIHandler) UpdateClients(cfg *config.SDKConfig) {
-	if h == nil {
-		return
-	}
-	h.Cfg = cfg
-	h.cfgPtr.Store(cfg)
-}
+func (h *BaseAPIHandler) UpdateClients(cfg *config.SDKConfig) { h.Cfg = cfg }
 
 // SetPluginHost configures the optional plugin interceptor host.
 func (h *BaseAPIHandler) SetPluginHost(host PluginInterceptorHost) {
@@ -565,14 +557,12 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	newCtx, cancel := context.WithCancel(parentCtx)
 
 	endpoint := ""
-	requestPath := ""
 	if c != nil && c.Request != nil {
 		path := strings.TrimSpace(c.FullPath())
 		if path == "" && c.Request.URL != nil {
 			path = strings.TrimSpace(c.Request.URL.Path)
 		}
 		if path != "" {
-			requestPath = path
 			method := strings.TrimSpace(c.Request.Method)
 			if method != "" {
 				endpoint = method + " " + path
@@ -583,9 +573,6 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	}
 	if endpoint != "" {
 		newCtx = logging.WithEndpoint(newCtx, endpoint)
-	}
-	if requestPath != "" {
-		newCtx = context.WithValue(newCtx, requestPathContextKey{}, requestPath)
 	}
 	newCtx = logging.WithResponseStatusHolder(newCtx)
 	newCtx = logging.WithResponseHeadersHolder(newCtx)
@@ -606,7 +593,7 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 		if c != nil {
 			logging.SetResponseStatus(cancelCtx, c.Writer.Status())
 		}
-		if cfg := h.Config(); cfg != nil && cfg.RequestLog && len(params) == 1 {
+		if h.Cfg.RequestLog && len(params) == 1 {
 			if captured, exists := c.Get(logging.APIResponseCapturedContextKey); exists {
 				if capturedBool, ok := captured.(bool); ok && capturedBool {
 					cancel()
@@ -658,7 +645,7 @@ func (h *BaseAPIHandler) StartNonStreamingKeepAlive(c *gin.Context, ctx context.
 	if h == nil || c == nil {
 		return func() {}
 	}
-	interval := NonStreamingKeepAliveInterval(h.Config())
+	interval := NonStreamingKeepAliveInterval(h.Cfg)
 	if interval <= 0 {
 		return func() {}
 	}
@@ -745,23 +732,24 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	originalRequestedModel := modelName
 	routeDecision := h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, false, execOptions)
 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
+	if errMsg := validateNativeInteractionsExecution(entryProtocol, execOptions, routeDecision); errMsg != nil {
+		return nil, nil, errMsg
+	}
 	if routeDecision.ExecutorPluginID != "" {
 		return h.executeWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
-	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision)
+	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
+	providers = adjustExecutionProvidersForEntryProtocol(entryProtocol, providers)
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = originalRequestedModel
+	addAuthSelectionModelMetadata(reqMeta, execOptions.AuthSelectionModel)
 	addModelExecutionSourceMetadata(reqMeta, execOptions.InternalSource)
-	payload := rawJSON
-	if len(payload) > 0 {
-		// FORK[prompt-rules]: apply configured prompt rewrites after model routing.
-		payload = helps.ApplyPromptRules(entryProtocol, normalizedModel, payload, requestPathFromContext(ctx), alt)
-	}
-	setReasoningEffortMetadata(reqMeta, entryProtocol, normalizedModel, payload)
-	setServiceTierMetadata(reqMeta, payload)
+	setReasoningEffortMetadata(reqMeta, entryProtocol, normalizedModel, rawJSON)
+	setServiceTierMetadata(reqMeta, rawJSON)
+	payload := applyConfiguredPromptRules(rawJSON, entryProtocol, normalizedModel, reqMeta, alt)
 	if len(payload) == 0 {
 		payload = nil
 	}
@@ -801,7 +789,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	}
 	executedReq, executedOpts := afterAuthCapture.apply(req, opts)
 	rawResponseHeaders := cloneHeader(resp.Headers)
-	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Config()))
+	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Cfg))
 	body, responseHeaders := h.applyResponseInterceptors(ctx, responseProtocol, normalizedModel, originalRequestedModel, executedOpts, rawResponseHeaders, responseHeaders, executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID)
 	return body, responseHeaders, nil
 }
@@ -818,19 +806,17 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	if routeDecision.ExecutorPluginID != "" {
 		return h.countWithPluginExecutor(ctx, handlerType, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
-	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, false, routeDecision)
+	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, false, routeDecision, execOptions)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
+	providers = adjustExecutionProvidersForEntryProtocol(handlerType, providers)
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = originalRequestedModel
-	payload := rawJSON
-	if len(payload) > 0 {
-		// FORK[prompt-rules]: keep count-token requests aligned with execution requests.
-		payload = helps.ApplyPromptRules(handlerType, normalizedModel, payload, requestPathFromContext(ctx), alt)
-	}
-	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, payload)
-	setServiceTierMetadata(reqMeta, payload)
+	addAuthSelectionModelMetadata(reqMeta, execOptions.AuthSelectionModel)
+	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
+	setServiceTierMetadata(reqMeta, rawJSON)
+	payload := applyConfiguredPromptRules(rawJSON, handlerType, normalizedModel, reqMeta, alt)
 	if len(payload) == 0 {
 		payload = nil
 	}
@@ -869,7 +855,7 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	}
 	executedReq, executedOpts := afterAuthCapture.apply(req, opts)
 	rawResponseHeaders := cloneHeader(resp.Headers)
-	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Config()))
+	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Cfg))
 	body, responseHeaders := h.applyResponseInterceptors(ctx, handlerType, normalizedModel, originalRequestedModel, executedOpts, rawResponseHeaders, responseHeaders, executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID)
 	return body, responseHeaders, nil
 }
@@ -887,7 +873,7 @@ func (h *BaseAPIHandler) executeWithPluginExecutor(ctx context.Context, entryPro
 		return nil, nil, executionErrorMessage(errExecute)
 	}
 	rawResponseHeaders := cloneHeader(resp.Headers)
-	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Config()))
+	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Cfg))
 	body, responseHeaders := h.applyResponseInterceptors(ctx, responseProtocol, modelName, originalRequestedModel, opts, rawResponseHeaders, responseHeaders, opts.OriginalRequest, req.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID)
 	return body, responseHeaders, nil
 }
@@ -905,7 +891,7 @@ func (h *BaseAPIHandler) countWithPluginExecutor(ctx context.Context, handlerTyp
 		return nil, nil, executionErrorMessage(errCount)
 	}
 	rawResponseHeaders := cloneHeader(resp.Headers)
-	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Config()))
+	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Cfg))
 	body, responseHeaders := h.applyResponseInterceptors(ctx, handlerType, modelName, originalRequestedModel, opts, rawResponseHeaders, responseHeaders, opts.OriginalRequest, req.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID)
 	return body, responseHeaders, nil
 }
@@ -913,14 +899,11 @@ func (h *BaseAPIHandler) countWithPluginExecutor(ctx context.Context, handlerTyp
 func (h *BaseAPIHandler) pluginExecutorRequest(ctx context.Context, entryProtocol, responseProtocol, modelName, originalRequestedModel string, rawJSON []byte, alt string, stream bool, execOptions modelExecutionOptions) (coreexecutor.Request, coreexecutor.Options) {
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = originalRequestedModel
+	addAuthSelectionModelMetadata(reqMeta, execOptions.AuthSelectionModel)
 	addModelExecutionSourceMetadata(reqMeta, execOptions.InternalSource)
-	payload := rawJSON
-	if len(payload) > 0 {
-		// FORK[prompt-rules]: plugin executors receive the same rewritten payload surface.
-		payload = helps.ApplyPromptRules(entryProtocol, modelName, payload, requestPathFromContext(ctx), alt)
-	}
-	setReasoningEffortMetadata(reqMeta, entryProtocol, modelName, payload)
-	setServiceTierMetadata(reqMeta, payload)
+	setReasoningEffortMetadata(reqMeta, entryProtocol, modelName, rawJSON)
+	setServiceTierMetadata(reqMeta, rawJSON)
+	payload := applyConfiguredPromptRules(rawJSON, entryProtocol, modelName, reqMeta, alt)
 	if len(payload) == 0 {
 		payload = nil
 	}
@@ -1019,7 +1002,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		return nil, nil, errChan
 	}
 
-	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Config())
+	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg)
 	interceptorHost := h.interceptorHost()
 	streamInterceptorsActive := streamInterceptorsEnabled(interceptorHost)
 	rawStreamHeaders := cloneHeader(streamResult.Headers)
@@ -1144,26 +1127,30 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	originalRequestedModel := modelName
 	routeDecision := h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, true, execOptions)
 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
+	if errMsg := validateNativeInteractionsExecution(entryProtocol, execOptions, routeDecision); errMsg != nil {
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan <- errMsg
+		close(errChan)
+		return nil, nil, errChan
+	}
 	if routeDecision.ExecutorPluginID != "" {
 		return h.streamWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
-	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision)
+	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
 		close(errChan)
 		return nil, nil, errChan
 	}
+	providers = adjustExecutionProvidersForEntryProtocol(entryProtocol, providers)
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = originalRequestedModel
+	addAuthSelectionModelMetadata(reqMeta, execOptions.AuthSelectionModel)
 	addModelExecutionSourceMetadata(reqMeta, execOptions.InternalSource)
-	payload := rawJSON
-	if len(payload) > 0 {
-		// FORK[prompt-rules]: streaming requests use the same pre-translation rewrites.
-		payload = helps.ApplyPromptRules(entryProtocol, normalizedModel, payload, requestPathFromContext(ctx), alt)
-	}
-	setReasoningEffortMetadata(reqMeta, entryProtocol, normalizedModel, payload)
-	setServiceTierMetadata(reqMeta, payload)
+	setReasoningEffortMetadata(reqMeta, entryProtocol, normalizedModel, rawJSON)
+	setServiceTierMetadata(reqMeta, rawJSON)
+	payload := applyConfiguredPromptRules(rawJSON, entryProtocol, normalizedModel, reqMeta, alt)
 	if len(payload) == 0 {
 		payload = nil
 	}
@@ -1207,7 +1194,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	executedRequest := func() (coreexecutor.Request, coreexecutor.Options) {
 		return afterAuthCapture.apply(req, opts)
 	}
-	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Config())
+	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg)
 	interceptorHost := h.interceptorHost()
 	streamInterceptorsActive := streamInterceptorsEnabled(interceptorHost)
 	// Capture upstream headers from the initial connection synchronously before the goroutine starts.
@@ -1297,7 +1284,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		bootstrapRetries := 0
 		chunkIndex := 0
 		var historyChunks [][]byte
-		maxBootstrapRetries := StreamingBootstrapRetries(h.Config())
+		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
 
 		sendErr := func(msg *interfaces.ErrorMessage) bool {
 			if ctx == nil {
@@ -1469,6 +1456,68 @@ func validateSSEDataJSON(chunk []byte) error {
 	return nil
 }
 
+func preferExecutionProvider(providers []string, preferred string) []string {
+	preferred = strings.ToLower(strings.TrimSpace(preferred))
+	if preferred == "" || len(providers) < 2 {
+		return providers
+	}
+	preferredIndex := -1
+	for i := range providers {
+		if strings.ToLower(strings.TrimSpace(providers[i])) == preferred {
+			preferredIndex = i
+			break
+		}
+	}
+	if preferredIndex <= 0 {
+		return providers
+	}
+	out := make([]string, 0, len(providers))
+	out = append(out, providers[preferredIndex])
+	out = append(out, providers[:preferredIndex]...)
+	out = append(out, providers[preferredIndex+1:]...)
+	return out
+}
+
+func adjustExecutionProvidersForEntryProtocol(entryProtocol string, providers []string) []string {
+	if entryProtocol == Interactions {
+		return preferExecutionProvider(providers, GeminiInteractions)
+	}
+	if supportsNativeInteractionsEntryProtocol(entryProtocol) {
+		return providers
+	}
+	return excludeExecutionProvider(providers, GeminiInteractions)
+}
+
+func supportsNativeInteractionsEntryProtocol(entryProtocol string) bool {
+	switch entryProtocol {
+	case Interactions, OpenAI, OpenaiResponse, Claude, Gemini:
+		return true
+	default:
+		return false
+	}
+}
+
+func excludeExecutionProvider(providers []string, excluded string) []string {
+	excluded = strings.ToLower(strings.TrimSpace(excluded))
+	if excluded == "" || len(providers) == 0 {
+		return providers
+	}
+	excludedIndex := -1
+	for i := range providers {
+		if strings.ToLower(strings.TrimSpace(providers[i])) == excluded {
+			excludedIndex = i
+			break
+		}
+	}
+	if excludedIndex == -1 {
+		return providers
+	}
+	out := make([]string, 0, len(providers)-1)
+	out = append(out, providers[:excludedIndex]...)
+	out = append(out, providers[excludedIndex+1:]...)
+	return out
+}
+
 func statusFromError(err error) int {
 	if err == nil {
 		return 0
@@ -1485,10 +1534,48 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	return h.getRequestDetailsWithOptions(modelName, false)
 }
 
+func validateNativeInteractionsExecution(entryProtocol string, execOptions modelExecutionOptions, routeDecision modelRouteDecision) *interfaces.ErrorMessage {
+	forcedProvider := strings.ToLower(strings.TrimSpace(execOptions.ForcedProvider))
+	if forcedProvider == "" || entryProtocol != Interactions {
+		return nil
+	}
+	if routeDecision.ExecutorPluginID != "" {
+		return nativeInteractionsExecutionError()
+	}
+	if routeProvider := strings.ToLower(strings.TrimSpace(routeDecision.Provider)); routeProvider != "" && routeProvider != forcedProvider {
+		return nativeInteractionsExecutionError()
+	}
+	return nil
+}
+
+func nativeInteractionsExecutionError() *interfaces.ErrorMessage {
+	return &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      fmt.Errorf("agent is only supported for native interactions execution"),
+	}
+}
+
 // providersForExecution resolves the providers and normalized model for a request. When a model
 // router selected a built-in provider, it skips model->provider resolution and uses the router's
 // provider (with an optional target model); otherwise it falls back to the registry-based path.
-func (h *BaseAPIHandler) providersForExecution(modelName, originalRequestedModel string, allowImageModel bool, routeDecision modelRouteDecision) ([]string, string, *interfaces.ErrorMessage) {
+func (h *BaseAPIHandler) providersForExecution(modelName, originalRequestedModel string, allowImageModel bool, routeDecision modelRouteDecision, execOptions modelExecutionOptions) ([]string, string, *interfaces.ErrorMessage) {
+	forcedProvider := strings.ToLower(strings.TrimSpace(execOptions.ForcedProvider))
+	if forcedProvider != "" {
+		if routeDecision.ExecutorPluginID != "" {
+			return nil, "", nativeInteractionsExecutionError()
+		}
+		if routeProvider := strings.ToLower(strings.TrimSpace(routeDecision.Provider)); routeProvider != "" && routeProvider != forcedProvider {
+			return nil, "", nativeInteractionsExecutionError()
+		}
+		normalizedModel := strings.TrimSpace(modelName)
+		if normalizedModel == "" {
+			normalizedModel = strings.TrimSpace(originalRequestedModel)
+		}
+		if errMsg := h.validateImageOnlyModel(normalizedModel, allowImageModel); errMsg != nil {
+			return nil, "", errMsg
+		}
+		return []string{forcedProvider}, normalizedModel, nil
+	}
 	if routeDecision.Provider != "" {
 		normalizedModel := originalRequestedModel
 		if routeDecision.Model != "" {
@@ -1559,13 +1646,22 @@ func (h *BaseAPIHandler) validateImageOnlyModel(modelName string, allowImageMode
 	if baseModel == "" {
 		baseModel = strings.TrimSpace(modelName)
 	}
-	if strings.EqualFold(routeModelBaseName(baseModel), "gpt-image-2") && !allowImageModel {
+	if isOpenAIImageOnlyModel(baseModel) && !allowImageModel {
 		return &interfaces.ErrorMessage{
 			StatusCode: http.StatusServiceUnavailable,
 			Error:      fmt.Errorf("model %s is only supported on /v1/images/generations and /v1/images/edits", routeModelBaseName(baseModel)),
 		}
 	}
 	return nil
+}
+
+func isOpenAIImageOnlyModel(model string) bool {
+	switch strings.ToLower(strings.TrimSpace(routeModelBaseName(model))) {
+	case "gpt-image-1.5", "gpt-image-2", "grok-imagine-image", "grok-imagine-image-quality":
+		return true
+	default:
+		return false
+	}
 }
 
 func routeModelBaseName(model string) string {
@@ -2034,7 +2130,7 @@ func (h *BaseAPIHandler) applyResponseInterceptors(ctx context.Context, handlerT
 		StatusCode:      statusCode,
 		Metadata:        opts.Metadata,
 	}, skipPluginID)
-	responseHeaders = downstreamHeadersAfterInterceptors(rawResponseHeaders, finalInterceptorHeaders(rawResponseHeaders, resp.Headers), PassthroughHeadersEnabled(h.Config()))
+	responseHeaders = downstreamHeadersAfterInterceptors(rawResponseHeaders, finalInterceptorHeaders(rawResponseHeaders, resp.Headers), PassthroughHeadersEnabled(h.Cfg))
 	if len(resp.Body) > 0 {
 		body = cloneBytes(resp.Body)
 	}
@@ -2095,7 +2191,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	if msg != nil && msg.StatusCode > 0 {
 		status = msg.StatusCode
 	}
-	if msg != nil && msg.Addon != nil && PassthroughHeadersEnabled(h.Config()) {
+	if msg != nil && msg.Addon != nil && PassthroughHeadersEnabled(h.Cfg) {
 		for key, values := range msg.Addon {
 			if len(values) == 0 {
 				continue
@@ -2140,7 +2236,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 }
 
 func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *interfaces.ErrorMessage) {
-	if cfg := h.Config(); cfg != nil && cfg.RequestLog {
+	if h.Cfg.RequestLog {
 		if ginContext, ok := ctx.Value("gin").(*gin.Context); ok {
 			if apiResponseErrors, isExist := ginContext.Get("API_RESPONSE_ERROR"); isExist {
 				if slicesAPIResponseError, isOk := apiResponseErrors.([]*interfaces.ErrorMessage); isOk {

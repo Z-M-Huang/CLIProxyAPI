@@ -17,7 +17,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/safemode"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usagepersist"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usagestore"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
@@ -37,7 +36,7 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 }
 
 // StartServiceWithPluginHost builds and runs the proxy service with a shared plugin host.
-func StartServiceWithPluginHost(cfg *config.Config, configPath string, localPassword string, host *pluginhost.Host) {
+func StartServiceWithPluginHost(cfg *config.Config, configPath string, localPassword string, host *pluginhost.Host, serverOptions ...api.ServerOption) {
 	store, errStore := openUsageStore(cfg, configPath)
 	if errStore != nil {
 		log.Errorf("failed to open usage database: %v", errStore)
@@ -46,13 +45,16 @@ func StartServiceWithPluginHost(cfg *config.Config, configPath string, localPass
 	usagepersist.SetStore(store)
 	defer closeUsageStore(store)
 
+	allServerOptions := append(usageServerOptions(store), serverOptions...)
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
-		WithLocalManagementPassword(localPassword).
-		WithServerOptions(usageServerOptions(store)...)
+		WithLocalManagementPassword(localPassword)
 	if host != nil {
 		builder = builder.WithPluginHost(host)
+	}
+	if len(allServerOptions) > 0 {
+		builder = builder.WithServerOptions(allServerOptions...)
 	}
 
 	ctxSignal, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -80,18 +82,6 @@ func StartServiceWithPluginHost(cfg *config.Config, configPath string, localPass
 	}
 }
 
-// StartExampleAPIKeyWarningServer starts a warning-only server for unsafe template API keys.
-func StartExampleAPIKeyWarningServer(cfg *config.Config, configPath string, keys []string) {
-	ctxSignal, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
-	log.Errorf("normal API server disabled: example API key values are configured in %s", configPath)
-	log.Errorf("example API key warning page listening on: %s", safemode.WarningServerURL(cfg))
-	if err := safemode.StartExampleAPIKeyWarningServer(ctxSignal, cfg, configPath, keys); err != nil && !errors.Is(err, context.Canceled) {
-		log.Errorf("example API key warning server exited with error: %v", err)
-	}
-}
-
 // StartServiceBackground starts the proxy service in a background goroutine
 // and returns a cancel function for shutdown and a done channel.
 func StartServiceBackground(cfg *config.Config, configPath string, localPassword string) (cancel func(), done <-chan struct{}) {
@@ -99,7 +89,7 @@ func StartServiceBackground(cfg *config.Config, configPath string, localPassword
 }
 
 // StartServiceBackgroundWithPluginHost starts the proxy service with a shared plugin host.
-func StartServiceBackgroundWithPluginHost(cfg *config.Config, configPath string, localPassword string, host *pluginhost.Host) (cancel func(), done <-chan struct{}) {
+func StartServiceBackgroundWithPluginHost(cfg *config.Config, configPath string, localPassword string, host *pluginhost.Host, serverOptions ...api.ServerOption) (cancel func(), done <-chan struct{}) {
 	store, errStore := openUsageStore(cfg, configPath)
 	if errStore != nil {
 		log.Errorf("failed to open usage database: %v", errStore)
@@ -109,13 +99,16 @@ func StartServiceBackgroundWithPluginHost(cfg *config.Config, configPath string,
 	}
 	usagepersist.SetStore(store)
 
+	allServerOptions := append(usageServerOptions(store), serverOptions...)
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
-		WithLocalManagementPassword(localPassword).
-		WithServerOptions(usageServerOptions(store)...)
+		WithLocalManagementPassword(localPassword)
 	if host != nil {
 		builder = builder.WithPluginHost(host)
+	}
+	if len(allServerOptions) > 0 {
+		builder = builder.WithServerOptions(allServerOptions...)
 	}
 
 	ctx, cancelFn := context.WithCancel(context.Background())
@@ -191,7 +184,14 @@ func openUsageStore(cfg *config.Config, configPath string) (*usagestore.Store, e
 			path = configured
 		}
 	}
-	return usagestore.Open(resolveUsageDatabasePath(path, configPath))
+	store, err := usagestore.Open(resolveUsageDatabasePath(path, configPath))
+	if err != nil {
+		return nil, err
+	}
+	if cfg != nil {
+		store.SetUsageEventRetentionDays(cfg.UsageEventRetentionDays)
+	}
+	return store, nil
 }
 
 func resolveUsageDatabasePath(path string, configPath string) string {

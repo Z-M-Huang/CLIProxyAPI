@@ -21,7 +21,6 @@ main  ←─[fast-forward]──  dev  ←─[merge]──  feat/<your-feature>
 - **`main`** is the default browse-branch. Always equals (or trails by a tag) `dev`. Don't commit to `main` directly; fast-forward from `dev` when releasing.
 - **`dev`** is the integration branch. All feature work and upstream sync land here.
 - **`feat/<short-name>`** is where you do your work. Cut from `dev`, PR back into `dev`.
-- **`feat/logging`** is reserved for the deferred v0.2.0 logging effort. Don't reuse the name.
 
 ## Workflow: starting a new feature
 
@@ -68,13 +67,21 @@ These are the files where the fork diverges from upstream. When syncing upstream
 - `.gitignore` — ignores local persistent data files.
 - `docker-compose.yml` — registry default (`zhironghuang/cli-proxy-api`).
 - `docker-build.sh`, `docker-build.ps1` — local image tag.
-- `config.example.yaml` — `panel-github-repository` points at our fork.
-- `internal/config/config.go` — `DefaultPanelGitHubRepository`.
+- `config.example.yaml` — fork panel repository, SQLite usage settings, Prompt Rules, and provider header defaults.
+- `internal/config/{config,parse}.go` — fork panel defaults, SQLite usage settings, Prompt Rules snapshots, and provider header compatibility.
 - `go.mod`, `go.sum` — fork-only SQLite/goose dependencies for persistent usage history.
 - `internal/managementasset/updater.go` — `defaultManagementReleaseURL`; the upstream `cpamc.router-for.me` fallback is intentionally absent.
 - `internal/api/handlers/management/config_basic.go` — `latestReleaseURL` (the `/v0/management/latest-version` endpoint).
-- `internal/usagestore/**`, `internal/usagepersist/plugin.go`, `internal/logging/sqlite_request_logger.go` — persistent SQLite usage statistics and request history storage.
-- `internal/api/server.go`, `internal/cmd/run.go`, `internal/api/handlers/management/{handler,logs,usage}.go` — wires the SQLite usage store into the server and management API.
+- `internal/usagestore/**`, `internal/usagepersist/plugin*.go`, `internal/logging/sqlite_request_logger.go` — persistent SQLite raw events, 15-minute rollups, retained dedup keys, and request histories.
+- `internal/logging/{async_emitter,request_logger}.go` and focused tests — asynchronous file logging with lossless forced-error writes and explicit flush/close behavior.
+- `internal/config/prompt_rules*.go`, `internal/runtime/executor/helps/prompt_rules*.go`, `internal/api/handlers/management/prompt_rules*.go` — Prompt Rules validation, protocol rewriting, and management API.
+- `internal/api/server.go`, `internal/cmd/run.go`, `internal/api/handlers/management/{handler,logs,usage,prompt_rules}.go`, `internal/api/handlers/management/usage_test.go` — wires SQLite usage and Prompt Rules into the server and management API.
+- `sdk/api/handlers/handlers.go` — applies Prompt Rules before built-in or plugin execution while preserving the raw client request.
+- `internal/tui/{app,client,dashboard,i18n,usage_tab}.go` — persisted Usage view in the terminal UI.
+- `internal/runtime/executor/{gemini,gemini_vertex,openai_compat,kimi,antigravity}_executor.go` and focused tests — provider header defaults; the legacy `gemini-cli-header-defaults` key is read only as a compatibility fallback for `gemini-header-defaults`.
+- `sdk/cliproxy/{builder,service}.go`, `sdk/cliproxy/service_config_race_test.go` — immutable config ownership and stable snapshots for concurrent model registration during hot reload.
+- `sdk/cliproxy/usage/manager.go`, `sdk/cliproxy/usage/manager_test.go` — graceful queue draining before the SQLite usage store closes.
+- `sdk/cliproxy/auth/conductor.go`, `sdk/cliproxy/auth/conductor_refresh_backoff_test.go` — exponential transient refresh backoff layered onto upstream unauthorized-refresh behavior.
 - `internal/api/server_test.go`, `internal/usage/logger_plugin.go`, `sdk/logging/request_logger.go`, `examples/custom-provider/main.go` — compatibility adjustments for SQLite-only request histories.
 - `README.md`, `README_CN.md`, `README_JA.md` — fork notice block at the top; sponsor block replaced with an upstream pointer.
 - `AGENTS.md`, `CLAUDE.md`, `docs/ai-assistant-guidance.md` — shared assistant guidance and imports.
@@ -108,8 +115,6 @@ The release tag is `zmh-vX.Y.Z` (the `zmh-` prefix avoids colliding with upstrea
    ```
 4. The frontend's matching `zmh-vX.Y.Z` tag (in [Cli-Proxy-API-Management-Center](https://github.com/Z-M-Huang/Cli-Proxy-API-Management-Center)) triggers its `release.yml` workflow on the self-hosted runner, publishing `management.html` as a GitHub Release asset. The backend's auto-updater fetches that asset on startup.
 
-The `feat/logging` deferred work targets the next release (`zmh-v0.2.0`).
-
 ## Things this fork deliberately does NOT do
 
 - We don't open PRs against `router-for-me/CLIProxyAPI` or `router-for-me/Cli-Proxy-API-Management-Center`.
@@ -136,6 +141,5 @@ git config core.hooksPath .githooks
 
 ## Pointers
 
-- Plan / decision history: `/home/ubuntu/.claude/plans/we-are-in-a-nested-emerson.md` (local-only).
 - Upstream: <https://github.com/router-for-me/CLIProxyAPI>.
 - Frontend fork: <https://github.com/Z-M-Huang/Cli-Proxy-API-Management-Center> (local sibling checkout: `../Cli-Proxy-API-Management-Center`).
