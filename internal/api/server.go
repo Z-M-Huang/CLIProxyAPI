@@ -665,7 +665,8 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 	if sessionID := strings.TrimSpace(routing.ID); sessionID != "" {
 		selectionHeaders.Set("X-Session-ID", sessionID)
 	}
-	selected, err := s.handlers.AuthManager.SelectAuth(c.Request.Context(), "codex", strings.TrimSpace(routing.Model), coreexecutor.Options{
+	ctx := context.WithValue(c.Request.Context(), "gin", c)
+	selected, err := s.handlers.AuthManager.SelectAuth(ctx, "codex", strings.TrimSpace(routing.Model), coreexecutor.Options{
 		Headers:         selectionHeaders,
 		OriginalRequest: body,
 	})
@@ -691,7 +692,6 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		headers.Set("Chatgpt-Account-Id", accountID)
 	}
 
-	ctx := context.WithValue(c.Request.Context(), "gin", c)
 	const upstreamURL = "https://chatgpt.com/backend-api/codex/alpha/search"
 	req, err := s.handlers.AuthManager.NewHttpRequest(
 		ctx, selected, http.MethodPost, upstreamURL, body, headers,
