@@ -29,7 +29,7 @@ type usageImportPayload struct {
 // GetUsageStatistics returns the request statistics snapshot.
 func (h *Handler) GetUsageStatistics(c *gin.Context) {
 	if h != nil && h.usageStore != nil {
-		snapshot, err := h.usageStore.BuildSnapshot(c.Request.Context())
+		snapshot, err := h.usageStore.BuildOverview(c.Request.Context())
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to load usage statistics: %v", err)})
 			return
@@ -116,7 +116,7 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to import usage statistics: %v", err)})
 			return
 		}
-		current, err := h.usageStore.BuildSnapshot(c.Request.Context())
+		current, err := h.usageStore.BuildOverview(c.Request.Context())
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to load usage statistics: %v", err)})
 			return
@@ -145,9 +145,20 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 	})
 }
 
-// GetUsageOverview returns aggregate usage metrics. It currently shares the
-// snapshot shape with /usage so existing dashboard code can consume it.
+// GetUsageOverview returns aggregate usage metrics backed by persisted rollups.
 func (h *Handler) GetUsageOverview(c *gin.Context) {
+	if h != nil && h.usageStore != nil {
+		snapshot, err := h.usageStore.BuildOverview(c.Request.Context())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to load usage overview: %v", err)})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"usage":           snapshot,
+			"failed_requests": snapshot.FailureCount,
+		})
+		return
+	}
 	h.GetUsageStatistics(c)
 }
 
@@ -168,12 +179,13 @@ func (h *Handler) GetUsageEvents(c *gin.Context) {
 			pageSize = 100
 		}
 		c.JSON(http.StatusOK, usagestore.UsageEventsPage{
-			Events:     []usagestore.UsageEventRecord{},
-			Models:     []string{},
-			Sources:    []string{},
-			Page:       page,
-			PageSize:   pageSize,
-			TotalPages: 0,
+			Events:      []usagestore.UsageEventRecord{},
+			Models:      []string{},
+			Sources:     []string{},
+			AuthIndexes: []string{},
+			Page:        page,
+			PageSize:    pageSize,
+			TotalPages:  0,
 		})
 		return
 	}
@@ -195,7 +207,7 @@ func (h *Handler) GetUsageEventFilters(c *gin.Context) {
 	filter.Page = 1
 	filter.PageSize = 1
 	if h == nil || h.usageStore == nil {
-		c.JSON(http.StatusOK, gin.H{"models": []string{}, "sources": []string{}})
+		c.JSON(http.StatusOK, gin.H{"models": []string{}, "sources": []string{}, "auth_indexes": []string{}})
 		return
 	}
 	page, err := h.usageStore.ListUsageEvents(c.Request.Context(), filter)
@@ -203,14 +215,15 @@ func (h *Handler) GetUsageEventFilters(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to list usage event filters: %v", err)})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"models": page.Models, "sources": page.Sources})
+	c.JSON(http.StatusOK, gin.H{"models": page.Models, "sources": page.Sources, "auth_indexes": page.AuthIndexes})
 }
 
 func parseUsageEventsFilter(c *gin.Context) (usagestore.UsageEventsFilter, error) {
 	filter := usagestore.UsageEventsFilter{
-		Model:  strings.TrimSpace(c.Query("model")),
-		Source: strings.TrimSpace(c.Query("source")),
-		Result: strings.ToLower(strings.TrimSpace(c.Query("result"))),
+		Model:     strings.TrimSpace(c.Query("model")),
+		Source:    strings.TrimSpace(c.Query("source")),
+		AuthIndex: strings.TrimSpace(firstUsageQuery(c, "auth_index", "authIndex")),
+		Result:    strings.ToLower(strings.TrimSpace(c.Query("result"))),
 	}
 	page, err := parseOptionalPositiveInt(c.Query("page"), 1, 0)
 	if err != nil {

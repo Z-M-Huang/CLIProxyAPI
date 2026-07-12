@@ -28,7 +28,7 @@ Hot rules:
 ## Commands
 
 ```bash
-gofmt -w . # Format after Go changes
+gofmt -w path/to/changed.go # Format changed Go files
 go build -o cli-proxy-api ./cmd/server # Build
 go run ./cmd/server # Run dev server
 go test ./... # Run all tests
@@ -49,17 +49,19 @@ Common flags: `--config <path>`, `--tui`, `--standalone`, `--local-model`, `--no
 
 - `cmd/server/`: server entrypoint.
 - `internal/api/`: Gin HTTP API, routes, middleware, and modules.
-- `internal/api/modules/amp/`: Amp integration, Amp-style routes, and reverse proxy.
 - `internal/thinking/`: main thinking/reasoning pipeline. `ApplyThinking()` in `apply.go` parses suffixes in `suffix.go`, suffix overrides body, normalizes config to canonical `ThinkingConfig` in `types.go`, normalizes and validates centrally in `validate.go` and `convert.go`, then applies provider-specific output through `ProviderApplier`. Do not break the canonical representation to per-provider translation architecture.
 - `internal/runtime/executor/`: per-provider runtime executors, including Codex WebSocket.
 - `internal/translator/`: provider protocol translators and shared `common`.
 - `internal/registry/`: model registry and remote updater through `StartModelsUpdater`; `--local-model` disables remote updates.
 - `internal/store/`: storage implementations and secret resolution.
-- `internal/managementasset/`: config snapshots and management assets.
+- `internal/pluginhost/` and `internal/pluginstore/`: native plugin lifecycle, routing, RPC, and release installation.
+- `internal/home/` and `internal/homeplugins/`: Home control-plane integration and plugin synchronization.
+- `internal/managementasset/`: management UI release lookup, download, and update state.
 - `internal/cache/`: request signature caching.
 - `internal/watcher/`: config hot reload and watchers.
 - `internal/wsrelay/`: WebSocket relay sessions.
-- `internal/usage/`: usage and token accounting.
+- `internal/usage/` and `sdk/cliproxy/usage/`: usage capture and the asynchronous delivery queue.
+- `internal/usagestore/` and `internal/usagepersist/`: SQLite raw events, 15-minute rollups, retained dedup keys, and request histories.
 - `internal/tui/`: Bubbletea terminal UI for `--tui` and `--standalone`.
 - `sdk/cliproxy/`: embeddable SDK entry, service, builder, watchers, and pipeline.
 - `test/`: cross-module integration tests.
@@ -113,15 +115,30 @@ Fork-owned files:
 - `internal/config/prompt_rules_test.go`
 - `internal/api/handlers/management/prompt_rules.go`
 - `internal/api/handlers/management/prompt_rules_test.go`
-- `internal/logging/sqlite_request_logger.go`
+- `internal/logging/async_emitter*.go`, `internal/logging/request_logger_bench_test.go`, `internal/logging/sqlite_request_logger.go`
+- `internal/cache/signature_cache_{bench,semantics}_test.go`
+- `internal/managementasset/fork_provider.go`, `internal/managementasset/updater_release_url_test.go`
+- `internal/runtime/executor/codex_executor_stream_chunkboundary_test.go`
+- `internal/tui/usage_tab*.go`
+- `internal/usage/logger_plugin*.go`
 - `internal/usagepersist/plugin.go`
+- `internal/usagepersist/plugin_test.go`
 - `internal/usagestore/migrations.go`
 - `internal/usagestore/migrations/00001_create_usage_store.sql`
+- `internal/usagestore/migrations/00002_add_cache_token_breakdown.sql`
+- `internal/usagestore/migrations/00003_create_usage_rollups.sql`
 - `internal/usagestore/store.go`
 - `internal/usagestore/store_test.go`
-- `internal/managementasset/fork_provider.go`
 - `internal/runtime/executor/helps/prompt_rules.go`
+- `internal/runtime/executor/helps/prompt_rules_claude.go`
+- `internal/runtime/executor/helps/prompt_rules_gemini.go`
+- `internal/runtime/executor/helps/prompt_rules_interactions.go`
+- `internal/runtime/executor/helps/prompt_rules_openai.go`
+- `internal/runtime/executor/helps/prompt_rules_responses.go`
 - `internal/runtime/executor/helps/prompt_rules_test.go`
+- `sdk/cliproxy/auth/conductor_refresh_backoff_test.go`
+- `sdk/cliproxy/service_config_race_test.go`
+- `sdk/cliproxy/usage/manager_test.go`
 
 Patched upstream files:
 
@@ -129,6 +146,8 @@ Patched upstream files:
 - `cmd/server/main.go`
 - `config.example.yaml`
 - `docker-compose.yml`
+- `docker-build.sh`, `docker-build.ps1`
+- `examples/plugin/claude-web-search-router/go/{go.mod,go.sum}`
 - `examples/custom-provider/main.go`
 - `go.mod`
 - `go.sum`
@@ -136,14 +155,34 @@ Patched upstream files:
 - `internal/api/handlers/management/config_basic.go`
 - `internal/api/handlers/management/logs.go`
 - `internal/api/handlers/management/usage.go`
+- `internal/api/handlers/management/usage_test.go`
 - `internal/api/server.go`
 - `internal/api/server_test.go`
 - `internal/cmd/run.go`
 - `internal/config/config.go`
+- `internal/config/parse.go`
+- `internal/config/codex_websocket_header_defaults_test.go`
+- `internal/cache/signature_cache.go`
+- `internal/logging/request_logger.go`
 - `internal/managementasset/updater.go`
-- `internal/usage/logger_plugin.go`
-- `internal/tui/app.go`
+- `internal/redisqueue/queue.go`
+- `internal/runtime/executor/antigravity_executor.go`
+- `internal/runtime/executor/antigravity_executor_buildrequest_test.go`
+- `internal/runtime/executor/gemini_executor.go`
+- `internal/runtime/executor/gemini_executor_test.go`
+- `internal/runtime/executor/gemini_vertex_executor.go`
+- `internal/runtime/executor/kimi_executor.go`
+- `internal/runtime/executor/kimi_executor_test.go`
+- `internal/runtime/executor/openai_compat_executor.go`
+- `internal/runtime/executor/openai_compat_executor_compact_test.go`
+- `internal/tui/{app,client,dashboard,i18n}.go`
+- `internal/watcher/dispatcher.go`
 - `sdk/logging/request_logger.go`
+- `sdk/api/handlers/handlers.go`
+- `sdk/cliproxy/service.go`
+- `sdk/cliproxy/builder.go`
+- `sdk/cliproxy/usage/manager.go`
+- `sdk/cliproxy/auth/conductor.go`
 
 Hard-fork triggers:
 
@@ -182,7 +221,12 @@ Current fork topics:
 - `prompt-rules`: fork-owned prompt-rule type and validation cluster extracted from `internal/config/config.go`.
 - `management-asset`: fork release feed and fallback asset wiring for `management.html`.
 - `releases`: `zmh-v*` tag namespace and fork repo links.
-- `usage-sqlite`: persistent SQLite/goose usage statistics and request histories; `request-log` writes request history to SQLite while `logging-to-file` remains application-log file output.
+- `usage-sqlite`: SQLite/goose raw usage events, durable 15-minute rollups, retained dedup keys, and request histories. Raw-event retention is optional and never removes rollups; `request-log` writes request history to SQLite while `logging-to-file` remains application-log file output.
+- `provider-headers`: Gemini API, OpenAI-compatible, Kimi, and Antigravity User-Agent defaults; `gemini-cli-header-defaults` remains a read-only legacy fallback.
+- `request-logging`: asynchronous file-log emission plus SQLite request histories; forced error logs remain lossless.
+- `usage-tui`: persisted usage visibility in the terminal UI.
+- `config-snapshot`: race-free reads of provider config while hot reload swaps the active config.
+- `refresh-backoff`: exponential transient credential-refresh backoff while retaining upstream unauthorized handling.
 
 ## Upstream Conflict Playbook
 
@@ -191,7 +235,7 @@ When merging `upstream/dev`, resolve conflicts by intent rather than mechanicall
 1. Keep fork identity, release wiring, repository URLs, assistant guidance, README fork notices, Docker image names, and `zmh-v*` tag behavior from this fork.
 2. Take upstream's generic bug fixes, protocol updates, dependency updates, tests, and refactors unless they directly remove or break a fork feature.
 3. When upstream changes code that a fork feature touches, adapt the fork feature to the upstream shape instead of reverting the upstream change. Preserve both behaviors when they are distinct compatibility surfaces.
-4. For overlapping management APIs, keep fork endpoints stable and add upstream endpoints alongside them when they serve different clients. Example: keep this fork's in-memory usage snapshot/import/export API while also accepting upstream's usage-queue API.
+4. For overlapping management APIs, keep fork endpoints stable and add upstream endpoints alongside them when they serve different clients. Example: keep this fork's persisted usage snapshot/import/export API while also exposing upstream's usage-queue API.
 5. For metadata or request-routing conflicts, preserve upstream's client-visible semantics and apply fork behavior at the narrowest later point. Example: store the client requested model alias for usage accounting, while applying prompt rules against the normalized model routed by the fork.
 6. For generated files, resolve the source manifest first, regenerate the generated artifact with the repo's toolchain, and review the diff instead of hand-editing generated output.
 7. For conflicts outside the customization surface, stop and understand why the overlap exists before resolving it. Treat repeated conflicts in the same area as a signal to extract a fork-owned hook or helper.
@@ -203,4 +247,3 @@ When merging `upstream/dev`, resolve conflicts by intent rather than mechanicall
 
 - `CONTRIBUTING.md`: fork workflow, branch model, release process, and customization surface.
 - Frontend release repo: `../Cli-Proxy-API-Management-Center`.
-- Local plan history, when present: `/home/ubuntu/.claude/plans/we-are-in-a-nested-emerson.md`.

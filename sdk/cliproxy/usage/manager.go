@@ -29,12 +29,16 @@ type Record struct {
 	ReasoningEffort string
 	// ServiceTier stores the client-requested service tier for request event logs.
 	ServiceTier string
-	RequestedAt time.Time
-	Latency     time.Duration
-	TTFT        time.Duration
-	Failed      bool
-	Fail        Failure
-	Detail      Detail
+	// RequestServiceTier explicitly aliases the client-requested service tier.
+	RequestServiceTier string
+	// ResponseServiceTier stores the final tier reported by the upstream response.
+	ResponseServiceTier string
+	RequestedAt         time.Time
+	Latency             time.Duration
+	TTFT                time.Duration
+	Failed              bool
+	Fail                Failure
+	Detail              Detail
 	// ResponseHeaders stores a snapshot of upstream response headers for usage sinks.
 	ResponseHeaders http.Header
 }
@@ -54,6 +58,7 @@ type Detail struct {
 	CacheReadTokens     int64
 	CacheCreationTokens int64
 	TotalTokens         int64
+	ResponseServiceTier string
 }
 
 type requestedModelAliasContextKey struct{}
@@ -172,6 +177,7 @@ type Manager struct {
 	cond   *sync.Cond
 	queue  []queueItem
 	closed bool
+	done   chan struct{}
 
 	pluginsMu sync.RWMutex
 	plugins   []Plugin
@@ -180,7 +186,7 @@ type Manager struct {
 
 // NewManager constructs a manager with a buffered queue.
 func NewManager(buffer int) *Manager {
-	m := &Manager{}
+	m := &Manager{done: make(chan struct{})}
 	m.cond = sync.NewCond(&m.mu)
 	return m
 }
@@ -205,6 +211,8 @@ func (m *Manager) Stop() {
 	if m == nil {
 		return
 	}
+	// FORK[usage-sqlite]: drain queued writes before the persistent store closes.
+	m.Start(context.Background())
 	m.stopOnce.Do(func() {
 		if m.cancel != nil {
 			m.cancel()
@@ -214,6 +222,7 @@ func (m *Manager) Stop() {
 		m.mu.Unlock()
 		m.cond.Broadcast()
 	})
+	<-m.done
 }
 
 // Register appends a plugin to the delivery list.
@@ -269,6 +278,7 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 }
 
 func (m *Manager) run(ctx context.Context) {
+	defer close(m.done)
 	for {
 		m.mu.Lock()
 		for !m.closed && len(m.queue) == 0 {

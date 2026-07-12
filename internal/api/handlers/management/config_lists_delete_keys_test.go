@@ -24,18 +24,16 @@ func writeTestConfigFile(t *testing.T) string {
 
 func TestDeleteGeminiKey_RequiresBaseURLWhenAPIKeyDuplicated(t *testing.T) {
 	t.Parallel()
-	gin.SetMode(gin.TestMode)
 
 	h := &Handler{
-
+		cfg: &config.Config{
+			GeminiKey: []config.GeminiKey{
+				{APIKey: "shared-key", BaseURL: "https://a.example.com"},
+				{APIKey: "shared-key", BaseURL: "https://b.example.com"},
+			},
+		},
 		configFilePath: writeTestConfigFile(t),
 	}
-	h.SetConfig(&config.Config{
-		GeminiKey: []config.GeminiKey{
-			{APIKey: "shared-key", BaseURL: "https://a.example.com"},
-			{APIKey: "shared-key", BaseURL: "https://b.example.com"},
-		},
-	})
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -46,25 +44,23 @@ func TestDeleteGeminiKey_RequiresBaseURLWhenAPIKeyDuplicated(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
-	if got := len(h.cfg().GeminiKey); got != 2 {
+	if got := len(h.cfg.GeminiKey); got != 2 {
 		t.Fatalf("gemini keys len = %d, want 2", got)
 	}
 }
 
 func TestDeleteGeminiKey_DeletesOnlyMatchingBaseURL(t *testing.T) {
 	t.Parallel()
-	gin.SetMode(gin.TestMode)
 
 	h := &Handler{
-
+		cfg: &config.Config{
+			GeminiKey: []config.GeminiKey{
+				{APIKey: "shared-key", BaseURL: "https://a.example.com"},
+				{APIKey: "shared-key", BaseURL: "https://b.example.com"},
+			},
+		},
 		configFilePath: writeTestConfigFile(t),
 	}
-	h.SetConfig(&config.Config{
-		GeminiKey: []config.GeminiKey{
-			{APIKey: "shared-key", BaseURL: "https://a.example.com"},
-			{APIKey: "shared-key", BaseURL: "https://b.example.com"},
-		},
-	})
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -75,28 +71,26 @@ func TestDeleteGeminiKey_DeletesOnlyMatchingBaseURL(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if got := len(h.cfg().GeminiKey); got != 1 {
+	if got := len(h.cfg.GeminiKey); got != 1 {
 		t.Fatalf("gemini keys len = %d, want 1", got)
 	}
-	if got := h.cfg().GeminiKey[0].BaseURL; got != "https://b.example.com" {
+	if got := h.cfg.GeminiKey[0].BaseURL; got != "https://b.example.com" {
 		t.Fatalf("remaining base-url = %q, want %q", got, "https://b.example.com")
 	}
 }
 
 func TestDeleteClaudeKey_DeletesEmptyBaseURLWhenExplicitlyProvided(t *testing.T) {
 	t.Parallel()
-	gin.SetMode(gin.TestMode)
 
 	h := &Handler{
-
+		cfg: &config.Config{
+			ClaudeKey: []config.ClaudeKey{
+				{APIKey: "shared-key", BaseURL: ""},
+				{APIKey: "shared-key", BaseURL: "https://claude.example.com"},
+			},
+		},
 		configFilePath: writeTestConfigFile(t),
 	}
-	h.SetConfig(&config.Config{
-		ClaudeKey: []config.ClaudeKey{
-			{APIKey: "shared-key", BaseURL: ""},
-			{APIKey: "shared-key", BaseURL: "https://claude.example.com"},
-		},
-	})
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -107,28 +101,26 @@ func TestDeleteClaudeKey_DeletesEmptyBaseURLWhenExplicitlyProvided(t *testing.T)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if got := len(h.cfg().ClaudeKey); got != 1 {
+	if got := len(h.cfg.ClaudeKey); got != 1 {
 		t.Fatalf("claude keys len = %d, want 1", got)
 	}
-	if got := h.cfg().ClaudeKey[0].BaseURL; got != "https://claude.example.com" {
+	if got := h.cfg.ClaudeKey[0].BaseURL; got != "https://claude.example.com" {
 		t.Fatalf("remaining base-url = %q, want %q", got, "https://claude.example.com")
 	}
 }
 
 func TestDeleteVertexCompatKey_DeletesOnlyMatchingBaseURL(t *testing.T) {
 	t.Parallel()
-	gin.SetMode(gin.TestMode)
 
 	h := &Handler{
-
+		cfg: &config.Config{
+			VertexCompatAPIKey: []config.VertexCompatKey{
+				{APIKey: "shared-key", BaseURL: "https://a.example.com"},
+				{APIKey: "shared-key", BaseURL: "https://b.example.com"},
+			},
+		},
 		configFilePath: writeTestConfigFile(t),
 	}
-	h.SetConfig(&config.Config{
-		VertexCompatAPIKey: []config.VertexCompatKey{
-			{APIKey: "shared-key", BaseURL: "https://a.example.com"},
-			{APIKey: "shared-key", BaseURL: "https://b.example.com"},
-		},
-	})
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -139,28 +131,26 @@ func TestDeleteVertexCompatKey_DeletesOnlyMatchingBaseURL(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if got := len(h.cfg().VertexCompatAPIKey); got != 1 {
+	if got := len(h.cfg.VertexCompatAPIKey); got != 1 {
 		t.Fatalf("vertex keys len = %d, want 1", got)
 	}
-	if got := h.cfg().VertexCompatAPIKey[0].BaseURL; got != "https://a.example.com" {
+	if got := h.cfg.VertexCompatAPIKey[0].BaseURL; got != "https://a.example.com" {
 		t.Fatalf("remaining base-url = %q, want %q", got, "https://a.example.com")
 	}
 }
 
 func TestDeleteCodexKey_RequiresBaseURLWhenAPIKeyDuplicated(t *testing.T) {
 	t.Parallel()
-	gin.SetMode(gin.TestMode)
 
 	h := &Handler{
-
+		cfg: &config.Config{
+			CodexKey: []config.CodexKey{
+				{APIKey: "shared-key", BaseURL: "https://a.example.com"},
+				{APIKey: "shared-key", BaseURL: "https://b.example.com"},
+			},
+		},
 		configFilePath: writeTestConfigFile(t),
 	}
-	h.SetConfig(&config.Config{
-		CodexKey: []config.CodexKey{
-			{APIKey: "shared-key", BaseURL: "https://a.example.com"},
-			{APIKey: "shared-key", BaseURL: "https://b.example.com"},
-		},
-	})
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -171,7 +161,7 @@ func TestDeleteCodexKey_RequiresBaseURLWhenAPIKeyDuplicated(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
-	if got := len(h.cfg().CodexKey); got != 2 {
+	if got := len(h.cfg.CodexKey); got != 2 {
 		t.Fatalf("codex keys len = %d, want 2", got)
 	}
 }

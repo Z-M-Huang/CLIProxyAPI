@@ -32,6 +32,7 @@ type pluginListEntry struct {
 	Enabled          bool                    `json:"enabled"`
 	EffectiveEnabled bool                    `json:"effective_enabled"`
 	SupportsOAuth    bool                    `json:"supports_oauth"`
+	OAuthProvider    string                  `json:"oauth_provider"`
 	Logo             string                  `json:"logo"`
 	ConfigFields     []pluginConfigFieldInfo `json:"config_fields"`
 	Menus            []pluginMenuInfo        `json:"menus"`
@@ -62,7 +63,7 @@ type pluginMenuInfo struct {
 
 // ListPlugins returns discovered, configured, and registered plugin entries.
 func (h *Handler) ListPlugins(c *gin.Context) {
-	if h == nil || h.cfg() == nil {
+	if h == nil || h.cfg == nil {
 		c.JSON(http.StatusOK, pluginListResponse{
 			PluginsDir: "plugins",
 			Plugins:    []pluginListEntry{},
@@ -71,17 +72,17 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 	}
 
 	h.mu.Lock()
-	pluginsEnabled := h.cfg().Plugins.Enabled
-	pluginsDir := normalizedPluginsDir(h.cfg().Plugins.Dir)
-	configs := make(map[string]config.PluginInstanceConfig, len(h.cfg().Plugins.Configs))
-	for id, item := range h.cfg().Plugins.Configs {
+	pluginsEnabled := h.cfg.Plugins.Enabled
+	pluginsDir := normalizedPluginsDir(h.cfg.Plugins.Dir)
+	configs := make(map[string]config.PluginInstanceConfig, len(h.cfg.Plugins.Configs))
+	for id, item := range h.cfg.Plugins.Configs {
 		configs[id] = item
 	}
 	host := h.pluginHost
 	h.mu.Unlock()
 
 	entries := make(map[string]pluginListEntry)
-	files, errDiscover := pluginhost.DiscoverPluginFiles(pluginsDir)
+	files, errDiscover := pluginhost.DiscoverPluginFiles(pluginsDir, pluginStoreDesiredVersions(configs))
 	if errDiscover != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_discovery_failed", "message": errDiscover.Error()})
 		return
@@ -90,7 +91,7 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 		entries[file.ID] = pluginListEntry{
 			ID:           htmlsanitize.String(file.ID),
 			Path:         htmlsanitize.String(file.Path),
-			Enabled:      true,
+			Enabled:      false,
 			ConfigFields: []pluginConfigFieldInfo{},
 			Menus:        []pluginMenuInfo{},
 		}
@@ -114,14 +115,11 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 			entry.ID = htmlsanitize.String(info.ID)
 			entry.Registered = true
 			entry.SupportsOAuth = info.SupportsOAuth
+			entry.OAuthProvider = htmlsanitize.String(info.OAuthProvider)
 			entry.Logo = htmlsanitize.String(info.Metadata.Logo)
 			entry.ConfigFields = pluginConfigFields(info.Metadata.ConfigFields)
 			entry.Menus = pluginMenus(info.Menus)
 			entry.Metadata = pluginMetadata(info.Metadata)
-			_, configured := configs[info.ID]
-			if !configured && !entry.Enabled {
-				entry.Enabled = true
-			}
 			entries[info.ID] = entry
 		}
 	}
@@ -163,13 +161,13 @@ func (h *Handler) GetPluginConfig(c *gin.Context) {
 	}
 
 	h.mu.Lock()
-	if h.cfg() == nil {
+	if h.cfg == nil {
 		h.mu.Unlock()
 		c.JSON(http.StatusNotFound, gin.H{"error": "plugin_not_found", "message": "plugin not found"})
 		return
 	}
-	item, configured := h.cfg().Plugins.Configs[id]
-	pluginsDir := normalizedPluginsDir(h.cfg().Plugins.Dir)
+	item, configured := h.cfg.Plugins.Configs[id]
+	pluginsDir := normalizedPluginsDir(h.cfg.Plugins.Dir)
 	host := h.pluginHost
 	h.mu.Unlock()
 
@@ -215,18 +213,25 @@ func (h *Handler) PatchPluginEnabled(c *gin.Context) {
 	}
 
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	ensurePluginConfigMap(h.cfg())
-	item := h.cfg().Plugins.Configs[id]
+	ensurePluginConfigMap(h.cfg)
+	item := h.cfg.Plugins.Configs[id]
 	node := pluginConfigNode(item)
 	setYAMLMappingValue(node, "enabled", boolYAMLNode(*body.Enabled))
 	updated, errConfig := pluginInstanceConfigFromNode(node)
 	if errConfig != nil {
+		h.mu.Unlock()
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": errConfig.Error()})
 		return
 	}
-	h.cfg().Plugins.Configs[id] = updated
-	h.persistLocked(c)
+	h.cfg.Plugins.Configs[id] = updated
+	cfgSnapshot, okSnapshot := h.saveConfigAndSnapshotLocked(c)
+	h.mu.Unlock()
+	if !okSnapshot {
+		return
+	}
+
+	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), cfgSnapshot)
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
 // PutPluginConfig replaces plugins.configs.<id> with the request object.
@@ -252,8 +257,8 @@ func (h *Handler) PutPluginConfig(c *gin.Context) {
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	ensurePluginConfigMap(h.cfg())
-	h.cfg().Plugins.Configs[id] = updated
+	ensurePluginConfigMap(h.cfg)
+	h.cfg.Plugins.Configs[id] = updated
 	h.persistLocked(c)
 }
 
@@ -270,8 +275,8 @@ func (h *Handler) PatchPluginConfig(c *gin.Context) {
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	ensurePluginConfigMap(h.cfg())
-	node := pluginConfigNode(h.cfg().Plugins.Configs[id])
+	ensurePluginConfigMap(h.cfg)
+	node := pluginConfigNode(h.cfg.Plugins.Configs[id])
 	keys := make([]string, 0, len(body))
 	for key := range body {
 		keys = append(keys, key)
@@ -295,7 +300,7 @@ func (h *Handler) PatchPluginConfig(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": errConfig.Error()})
 		return
 	}
-	h.cfg().Plugins.Configs[id] = updated
+	h.cfg.Plugins.Configs[id] = updated
 	h.persistLocked(c)
 }
 
@@ -311,17 +316,21 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 	}
 
 	h.mu.Lock()
-	if h.cfg() == nil {
+	if h.cfg == nil {
 		h.mu.Unlock()
 		c.JSON(http.StatusNotFound, gin.H{"error": "plugin_not_found", "message": "plugin not found"})
 		return
 	}
-	pluginsDir := normalizedPluginsDir(h.cfg().Plugins.Dir)
-	_, configured := h.cfg().Plugins.Configs[id]
+	pluginsDir := normalizedPluginsDir(h.cfg.Plugins.Dir)
+	item, configured := h.cfg.Plugins.Configs[id]
 	host := h.pluginHost
 	h.mu.Unlock()
 
-	path, errPath := pluginFilePath(pluginsDir, id)
+	var desiredVersions map[string]string
+	if configured {
+		desiredVersions = pluginStoreDesiredVersions(map[string]config.PluginInstanceConfig{id: item})
+	}
+	path, errPath := pluginFilePath(pluginsDir, id, desiredVersions)
 	if errPath != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_discovery_failed", "message": errPath.Error()})
 		return
@@ -331,7 +340,7 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		return
 	}
 
-	if pluginLoaded(host, id) && (host == nil || !host.UnloadPlugin(id)) && pluginLoaded(host, id) {
+	if pluginBusy(host, id) && (host == nil || !host.UnloadPlugin(id)) && pluginBusy(host, id) {
 		c.JSON(http.StatusConflict, gin.H{
 			"error":            "plugin_delete_requires_restart",
 			"message":          "loaded plugin cannot be deleted while the server is running",
@@ -353,9 +362,9 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 	}
 
 	h.mu.Lock()
-	delete(h.cfg().Plugins.Configs, id)
+	delete(h.cfg.Plugins.Configs, id)
 	if configured {
-		if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg()); errSave != nil {
+		if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); errSave != nil {
 			h.mu.Unlock()
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error":        "config_save_failed",
@@ -366,10 +375,10 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 			return
 		}
 	}
-	reloadCfg := h.cfg()
+	cfgSnapshot := h.reloadSnapshotConfigLocked()
 	h.mu.Unlock()
 
-	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), reloadCfg)
+	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), cfgSnapshot)
 	c.JSON(http.StatusOK, gin.H{
 		"status":             "deleted",
 		"id":                 htmlsanitize.String(id),
@@ -390,7 +399,7 @@ func normalizedPluginsDir(dir string) string {
 
 func pluginInstanceEnabled(item config.PluginInstanceConfig) bool {
 	if item.Enabled == nil {
-		return true
+		return false
 	}
 	return *item.Enabled
 }
@@ -420,8 +429,8 @@ func pluginDiscovered(pluginsDir string, id string) (bool, error) {
 	return false, nil
 }
 
-func pluginFilePath(pluginsDir string, id string) (string, error) {
-	files, errDiscover := pluginhost.DiscoverPluginFiles(pluginsDir)
+func pluginFilePath(pluginsDir string, id string, desiredVersions ...map[string]string) (string, error) {
+	files, errDiscover := pluginhost.DiscoverPluginFiles(pluginsDir, desiredVersions...)
 	if errDiscover != nil {
 		return "", errDiscover
 	}

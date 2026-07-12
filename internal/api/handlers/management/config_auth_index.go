@@ -34,15 +34,16 @@ type openAICompatibilityAPIKeyWithAuthIndex struct {
 }
 
 type openAICompatibilityWithAuthIndex struct {
-	Name          string                                   `json:"name"`
-	Priority      int                                      `json:"priority,omitempty"`
-	Disabled      bool                                     `json:"disabled"`
-	Prefix        string                                   `json:"prefix,omitempty"`
-	BaseURL       string                                   `json:"base-url"`
-	APIKeyEntries []openAICompatibilityAPIKeyWithAuthIndex `json:"api-key-entries,omitempty"`
-	Models        []config.OpenAICompatibilityModel        `json:"models,omitempty"`
-	Headers       map[string]string                        `json:"headers,omitempty"`
-	AuthIndex     string                                   `json:"auth-index,omitempty"`
+	Name           string                                   `json:"name"`
+	Priority       int                                      `json:"priority,omitempty"`
+	Disabled       bool                                     `json:"disabled"`
+	Prefix         string                                   `json:"prefix,omitempty"`
+	BaseURL        string                                   `json:"base-url"`
+	APIKeyEntries  []openAICompatibilityAPIKeyWithAuthIndex `json:"api-key-entries,omitempty"`
+	Models         []config.OpenAICompatibilityModel        `json:"models,omitempty"`
+	Headers        map[string]string                        `json:"headers,omitempty"`
+	DisableCooling bool                                     `json:"disable-cooling,omitempty"`
+	AuthIndex      string                                   `json:"auth-index,omitempty"`
 }
 
 func (h *Handler) liveAuthIndexByID() map[string]string {
@@ -51,7 +52,7 @@ func (h *Handler) liveAuthIndexByID() map[string]string {
 		return out
 	}
 	h.mu.Lock()
-	manager := h.authManager()
+	manager := h.authManager
 	h.mu.Unlock()
 	if manager == nil {
 		return out
@@ -83,24 +84,48 @@ func (h *Handler) geminiKeysWithAuthIndex() []geminiKeyWithAuthIndex {
 	}
 	liveIndexByID := h.liveAuthIndexByID()
 
-	// Snapshot config once so the read iterates one consistent slice. h.mu
-	// is dropped here: it serialised mgmt writes (applyConfigChange) before
-	// SetConfig was lock-free, but it never protected cfg-reads against
-	// concurrent SetConfig swaps. Multiple h.cfg() calls in the same
-	// helper observed different snapshots — see Codex Phase C round-3
-	// review BLOCKER #2.
-	cfg := h.cfg()
-	if cfg == nil {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
 		return nil
 	}
 
 	idGen := synthesizer.NewStableIDGenerator()
-	out := make([]geminiKeyWithAuthIndex, len(cfg.GeminiKey))
-	for i := range cfg.GeminiKey {
-		entry := cfg.GeminiKey[i]
+	out := make([]geminiKeyWithAuthIndex, len(h.cfg.GeminiKey))
+	for i := range h.cfg.GeminiKey {
+		entry := h.cfg.GeminiKey[i]
 		authIndex := ""
 		if key := strings.TrimSpace(entry.APIKey); key != "" {
 			id, _ := idGen.Next("gemini:apikey", key, entry.BaseURL)
+			authIndex = liveIndexByID[id]
+		}
+		out[i] = geminiKeyWithAuthIndex{
+			GeminiKey: entry,
+			AuthIndex: authIndex,
+		}
+	}
+	return out
+}
+
+func (h *Handler) interactionsKeysWithAuthIndex() []geminiKeyWithAuthIndex {
+	if h == nil {
+		return nil
+	}
+	liveIndexByID := h.liveAuthIndexByID()
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
+		return nil
+	}
+
+	idGen := synthesizer.NewStableIDGenerator()
+	out := make([]geminiKeyWithAuthIndex, len(h.cfg.InteractionsKey))
+	for i := range h.cfg.InteractionsKey {
+		entry := h.cfg.InteractionsKey[i]
+		authIndex := ""
+		if key := strings.TrimSpace(entry.APIKey); key != "" {
+			id, _ := idGen.Next("gemini-interactions:apikey", key, entry.BaseURL)
 			authIndex = liveIndexByID[id]
 		}
 		out[i] = geminiKeyWithAuthIndex{
@@ -117,15 +142,16 @@ func (h *Handler) claudeKeysWithAuthIndex() []claudeKeyWithAuthIndex {
 	}
 	liveIndexByID := h.liveAuthIndexByID()
 
-	cfg := h.cfg()
-	if cfg == nil {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
 		return nil
 	}
 
 	idGen := synthesizer.NewStableIDGenerator()
-	out := make([]claudeKeyWithAuthIndex, len(cfg.ClaudeKey))
-	for i := range cfg.ClaudeKey {
-		entry := cfg.ClaudeKey[i]
+	out := make([]claudeKeyWithAuthIndex, len(h.cfg.ClaudeKey))
+	for i := range h.cfg.ClaudeKey {
+		entry := h.cfg.ClaudeKey[i]
 		authIndex := ""
 		if key := strings.TrimSpace(entry.APIKey); key != "" {
 			id, _ := idGen.Next("claude:apikey", key, entry.BaseURL)
@@ -145,15 +171,16 @@ func (h *Handler) codexKeysWithAuthIndex() []codexKeyWithAuthIndex {
 	}
 	liveIndexByID := h.liveAuthIndexByID()
 
-	cfg := h.cfg()
-	if cfg == nil {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
 		return nil
 	}
 
 	idGen := synthesizer.NewStableIDGenerator()
-	out := make([]codexKeyWithAuthIndex, len(cfg.CodexKey))
-	for i := range cfg.CodexKey {
-		entry := cfg.CodexKey[i]
+	out := make([]codexKeyWithAuthIndex, len(h.cfg.CodexKey))
+	for i := range h.cfg.CodexKey {
+		entry := h.cfg.CodexKey[i]
 		authIndex := ""
 		if key := strings.TrimSpace(entry.APIKey); key != "" {
 			id, _ := idGen.Next("codex:apikey", key, entry.BaseURL)
@@ -173,15 +200,16 @@ func (h *Handler) vertexCompatKeysWithAuthIndex() []vertexCompatKeyWithAuthIndex
 	}
 	liveIndexByID := h.liveAuthIndexByID()
 
-	cfg := h.cfg()
-	if cfg == nil {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
 		return nil
 	}
 
 	idGen := synthesizer.NewStableIDGenerator()
-	out := make([]vertexCompatKeyWithAuthIndex, len(cfg.VertexCompatAPIKey))
-	for i := range cfg.VertexCompatAPIKey {
-		entry := cfg.VertexCompatAPIKey[i]
+	out := make([]vertexCompatKeyWithAuthIndex, len(h.cfg.VertexCompatAPIKey))
+	for i := range h.cfg.VertexCompatAPIKey {
+		entry := h.cfg.VertexCompatAPIKey[i]
 		id, _ := idGen.Next("vertex:apikey", entry.APIKey, entry.BaseURL, entry.ProxyURL)
 		authIndex := liveIndexByID[id]
 		out[i] = vertexCompatKeyWithAuthIndex{
@@ -198,12 +226,13 @@ func (h *Handler) openAICompatibilityWithAuthIndex() []openAICompatibilityWithAu
 	}
 	liveIndexByID := h.liveAuthIndexByID()
 
-	cfg := h.cfg()
-	if cfg == nil {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
 		return nil
 	}
 
-	normalized := normalizedOpenAICompatibilityEntries(cfg.OpenAICompatibility)
+	normalized := normalizedOpenAICompatibilityEntries(h.cfg.OpenAICompatibility)
 	out := make([]openAICompatibilityWithAuthIndex, len(normalized))
 	idGen := synthesizer.NewStableIDGenerator()
 	for i := range normalized {
@@ -215,14 +244,15 @@ func (h *Handler) openAICompatibilityWithAuthIndex() []openAICompatibilityWithAu
 		idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
 
 		response := openAICompatibilityWithAuthIndex{
-			Name:      entry.Name,
-			Priority:  entry.Priority,
-			Disabled:  entry.Disabled,
-			Prefix:    entry.Prefix,
-			BaseURL:   entry.BaseURL,
-			Models:    entry.Models,
-			Headers:   entry.Headers,
-			AuthIndex: "",
+			Name:           entry.Name,
+			Priority:       entry.Priority,
+			Disabled:       entry.Disabled,
+			Prefix:         entry.Prefix,
+			BaseURL:        entry.BaseURL,
+			Models:         entry.Models,
+			Headers:        entry.Headers,
+			DisableCooling: entry.DisableCooling,
+			AuthIndex:      "",
 		}
 		if len(entry.APIKeyEntries) == 0 {
 			id, _ := idGen.Next(idKind, entry.BaseURL)

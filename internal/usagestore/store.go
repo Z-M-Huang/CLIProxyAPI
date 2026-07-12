@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/pressly/goose/v3"
@@ -22,12 +23,16 @@ import (
 )
 
 const (
-	DefaultDatabasePath = "./data/usage.sqlite"
-	migrationTableName  = "usage_schema_migrations"
+	DefaultDatabasePath      = "./data/usage.sqlite"
+	migrationTableName       = "usage_schema_migrations"
+	usageRollupBucketSize    = 15 * time.Minute
+	usageRetentionCheckEvery = time.Hour
 )
 
 type Store struct {
-	db *sql.DB
+	db                    *sql.DB
+	usageRetentionDays    atomic.Int64
+	lastUsageRetentionRun atomic.Int64
 }
 
 type TokenStats struct {
@@ -57,13 +62,16 @@ type UsageEvent struct {
 }
 
 type RequestDetail struct {
-	Timestamp time.Time  `json:"timestamp"`
-	LatencyMS int64      `json:"latency_ms"`
-	Source    string     `json:"source"`
-	AuthIndex string     `json:"auth_index"`
-	Tokens    TokenStats `json:"tokens"`
-	Failed    bool       `json:"failed"`
-	RequestID string     `json:"request_id,omitempty"`
+	Timestamp          time.Time  `json:"timestamp"`
+	LatencyMS          int64      `json:"latency_ms"`
+	LatencyTotalMS     int64      `json:"latency_total_ms,omitempty"`
+	LatencySampleCount int64      `json:"latency_sample_count,omitempty"`
+	RequestCount       int64      `json:"request_count,omitempty"`
+	Source             string     `json:"source"`
+	AuthIndex          string     `json:"auth_index"`
+	Tokens             TokenStats `json:"tokens"`
+	Failed             bool       `json:"failed"`
+	RequestID          string     `json:"request_id,omitempty"`
 }
 
 type StatisticsSnapshot struct {
@@ -82,12 +90,16 @@ type StatisticsSnapshot struct {
 
 type APISnapshot struct {
 	TotalRequests int64                    `json:"total_requests"`
+	SuccessCount  int64                    `json:"success_count"`
+	FailureCount  int64                    `json:"failure_count"`
 	TotalTokens   int64                    `json:"total_tokens"`
 	Models        map[string]ModelSnapshot `json:"models"`
 }
 
 type ModelSnapshot struct {
 	TotalRequests int64           `json:"total_requests"`
+	SuccessCount  int64           `json:"success_count"`
+	FailureCount  int64           `json:"failure_count"`
 	TotalTokens   int64           `json:"total_tokens"`
 	Details       []RequestDetail `json:"details"`
 }
@@ -114,13 +126,14 @@ type UsageEventRecord struct {
 }
 
 type UsageEventsPage struct {
-	Events     []UsageEventRecord `json:"events"`
-	Models     []string           `json:"models"`
-	Sources    []string           `json:"sources"`
-	TotalCount int64              `json:"total_count"`
-	Page       int                `json:"page"`
-	PageSize   int                `json:"page_size"`
-	TotalPages int                `json:"total_pages"`
+	Events      []UsageEventRecord `json:"events"`
+	Models      []string           `json:"models"`
+	Sources     []string           `json:"sources"`
+	AuthIndexes []string           `json:"auth_indexes"`
+	TotalCount  int64              `json:"total_count"`
+	Page        int                `json:"page"`
+	PageSize    int                `json:"page_size"`
+	TotalPages  int                `json:"total_pages"`
 }
 
 type UsageEventsFilter struct {
@@ -130,6 +143,7 @@ type UsageEventsFilter struct {
 	PageSize  int
 	Model     string
 	Source    string
+	AuthIndex string
 	Result    string
 }
 
@@ -186,6 +200,61 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+func (s *Store) SetUsageEventRetentionDays(days int) {
+	if s == nil {
+		return
+	}
+	if days < 0 {
+		days = 0
+	}
+	s.usageRetentionDays.Store(int64(days))
+}
+
+func (s *Store) UsageEventRetentionDays() int {
+	if s == nil {
+		return 0
+	}
+	return int(s.usageRetentionDays.Load())
+}
+
+func (s *Store) PruneUsageEventsIfDue(ctx context.Context, now time.Time) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, nil
+	}
+	days := s.usageRetentionDays.Load()
+	if days <= 0 {
+		return 0, nil
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	lastRun := s.lastUsageRetentionRun.Load()
+	if lastRun > 0 && now.Sub(time.Unix(lastRun, 0)) < usageRetentionCheckEvery {
+		return 0, nil
+	}
+	if !s.lastUsageRetentionRun.CompareAndSwap(lastRun, now.Unix()) {
+		return 0, nil
+	}
+	return s.PruneUsageEventsBefore(ctx, now.AddDate(0, 0, -int(days)))
+}
+
+func (s *Store) PruneUsageEventsBefore(ctx context.Context, cutoff time.Time) (int64, error) {
+	if s == nil || s.db == nil || cutoff.IsZero() {
+		return 0, nil
+	}
+	result, err := s.db.ExecContext(ctx, "DELETE FROM usage_events WHERE timestamp < ?", formatTime(cutoff.UTC()))
+	if err != nil {
+		return 0, fmt.Errorf("usage store: prune usage events: %w", err)
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("usage store: pruned rows affected: %w", err)
+	}
+	return deleted, nil
+}
+
 func (s *Store) configure() error {
 	for _, statement := range []string{
 		"PRAGMA journal_mode=WAL",
@@ -223,7 +292,29 @@ func (s *Store) InsertUsageEvent(ctx context.Context, event UsageEvent) (bool, e
 		return false, fmt.Errorf("usage store is nil")
 	}
 	event = NormalizeUsageEvent(event)
-	result, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO usage_events (
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("usage store: begin usage event transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	keyResult, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO usage_event_keys (event_key, created_at) VALUES (?, ?)`,
+		event.EventKey, formatTime(time.Now().UTC()))
+	if err != nil {
+		return false, fmt.Errorf("usage store: insert usage event key: %w", err)
+	}
+	keyRows, err := keyResult.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("usage store: usage event key rows affected: %w", err)
+	}
+	if keyRows == 0 {
+		if errCommit := tx.Commit(); errCommit != nil {
+			return false, fmt.Errorf("usage store: commit duplicate usage event: %w", errCommit)
+		}
+		return false, nil
+	}
+
+	_, err = tx.ExecContext(ctx, `INSERT INTO usage_events (
 		event_key, api_group_key, provider, endpoint, auth_type, request_id, model, timestamp,
 		source, auth_index, failed, latency_ms, input_tokens, output_tokens, reasoning_tokens,
 		cached_tokens, cache_read_tokens, cache_creation_tokens, total_tokens, created_at
@@ -252,11 +343,42 @@ func (s *Store) InsertUsageEvent(ctx context.Context, event UsageEvent) (bool, e
 	if err != nil {
 		return false, fmt.Errorf("usage store: insert usage event: %w", err)
 	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("usage store: usage event rows affected: %w", err)
+
+	latencySampleCount := 0
+	if event.LatencyMS > 0 {
+		latencySampleCount = 1
 	}
-	return rows > 0, nil
+	bucketStart := event.Timestamp.UTC().Truncate(usageRollupBucketSize)
+	_, err = tx.ExecContext(ctx, `INSERT INTO usage_rollups (
+		bucket_start, api_group_key, provider, endpoint, auth_type, model, source, auth_index, failed,
+		request_count, latency_total_ms, latency_sample_count, input_tokens, output_tokens,
+		reasoning_tokens, cached_tokens, cache_read_tokens, cache_creation_tokens, total_tokens
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(bucket_start, api_group_key, provider, endpoint, auth_type, model, source, auth_index, failed)
+	DO UPDATE SET
+		request_count = request_count + 1,
+		latency_total_ms = latency_total_ms + excluded.latency_total_ms,
+		latency_sample_count = latency_sample_count + excluded.latency_sample_count,
+		input_tokens = input_tokens + excluded.input_tokens,
+		output_tokens = output_tokens + excluded.output_tokens,
+		reasoning_tokens = reasoning_tokens + excluded.reasoning_tokens,
+		cached_tokens = cached_tokens + excluded.cached_tokens,
+		cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+		cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
+		total_tokens = total_tokens + excluded.total_tokens`,
+		formatTime(bucketStart), event.APIGroupKey, event.Provider, event.Endpoint, event.AuthType,
+		event.Model, event.Source, event.AuthIndex, boolInt(event.Failed), event.LatencyMS, latencySampleCount,
+		event.Tokens.InputTokens, event.Tokens.OutputTokens, event.Tokens.ReasoningTokens,
+		event.Tokens.CachedTokens, event.Tokens.CacheReadTokens, event.Tokens.CacheCreationTokens,
+		event.Tokens.TotalTokens,
+	)
+	if err != nil {
+		return false, fmt.Errorf("usage store: update usage rollup: %w", err)
+	}
+	if errCommit := tx.Commit(); errCommit != nil {
+		return false, fmt.Errorf("usage store: commit usage event: %w", errCommit)
+	}
+	return true, nil
 }
 
 func (s *Store) ImportSnapshot(ctx context.Context, snapshot StatisticsSnapshot) (MergeResult, error) {
@@ -315,6 +437,34 @@ func (s *Store) BuildSnapshot(ctx context.Context) (StatisticsSnapshot, error) {
 	}
 	if err := rows.Err(); err != nil {
 		return snapshot, fmt.Errorf("usage store: read usage events: %w", err)
+	}
+	return snapshot, nil
+}
+
+func (s *Store) BuildOverview(ctx context.Context) (StatisticsSnapshot, error) {
+	snapshot := newStatisticsSnapshot()
+	if s == nil || s.db == nil {
+		return snapshot, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT bucket_start, api_group_key, provider, endpoint, auth_type,
+		model, source, auth_index, failed, request_count, latency_total_ms, latency_sample_count,
+		input_tokens, output_tokens, reasoning_tokens, cached_tokens, cache_read_tokens,
+		cache_creation_tokens, total_tokens
+		FROM usage_rollups ORDER BY bucket_start ASC, api_group_key ASC, model ASC`)
+	if err != nil {
+		return snapshot, fmt.Errorf("usage store: query usage rollups: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		rollup, errScan := scanUsageRollup(rows)
+		if errScan != nil {
+			return snapshot, errScan
+		}
+		applyRollupToSnapshot(&snapshot, rollup)
+	}
+	if err := rows.Err(); err != nil {
+		return snapshot, fmt.Errorf("usage store: read usage rollups: %w", err)
 	}
 	return snapshot, nil
 }
@@ -383,18 +533,23 @@ func (s *Store) ListUsageEvents(ctx context.Context, filter UsageEventsFilter) (
 	if err != nil {
 		return UsageEventsPage{}, err
 	}
+	authIndexes, err := s.listDistinct(ctx, "auth_index", filter)
+	if err != nil {
+		return UsageEventsPage{}, err
+	}
 	totalPages := 0
 	if total > 0 {
 		totalPages = int((total + int64(pageSize) - 1) / int64(pageSize))
 	}
 	return UsageEventsPage{
-		Events:     events,
-		Models:     models,
-		Sources:    sources,
-		TotalCount: total,
-		Page:       page,
-		PageSize:   pageSize,
-		TotalPages: totalPages,
+		Events:      events,
+		Models:      models,
+		Sources:     sources,
+		AuthIndexes: authIndexes,
+		TotalCount:  total,
+		Page:        page,
+		PageSize:    pageSize,
+		TotalPages:  totalPages,
 	}, nil
 }
 
@@ -599,6 +754,22 @@ type scannedUsageEvent struct {
 	Tokens      TokenStats
 }
 
+type scannedUsageRollup struct {
+	BucketStart        time.Time
+	APIGroupKey        string
+	Provider           string
+	Endpoint           string
+	AuthType           string
+	Model              string
+	Source             string
+	AuthIndex          string
+	Failed             bool
+	RequestCount       int64
+	LatencyTotalMS     int64
+	LatencySampleCount int64
+	Tokens             TokenStats
+}
+
 func scanUsageEvent(rows interface {
 	Scan(dest ...any) error
 }) (scannedUsageEvent, error) {
@@ -635,6 +806,41 @@ func scanUsageEvent(rows interface {
 	return event, nil
 }
 
+func scanUsageRollup(rows interface {
+	Scan(dest ...any) error
+}) (scannedUsageRollup, error) {
+	var rollup scannedUsageRollup
+	var bucketStart string
+	var failed int
+	if err := rows.Scan(
+		&bucketStart,
+		&rollup.APIGroupKey,
+		&rollup.Provider,
+		&rollup.Endpoint,
+		&rollup.AuthType,
+		&rollup.Model,
+		&rollup.Source,
+		&rollup.AuthIndex,
+		&failed,
+		&rollup.RequestCount,
+		&rollup.LatencyTotalMS,
+		&rollup.LatencySampleCount,
+		&rollup.Tokens.InputTokens,
+		&rollup.Tokens.OutputTokens,
+		&rollup.Tokens.ReasoningTokens,
+		&rollup.Tokens.CachedTokens,
+		&rollup.Tokens.CacheReadTokens,
+		&rollup.Tokens.CacheCreationTokens,
+		&rollup.Tokens.TotalTokens,
+	); err != nil {
+		return scannedUsageRollup{}, fmt.Errorf("usage store: scan usage rollup: %w", err)
+	}
+	rollup.BucketStart = parseTime(bucketStart)
+	rollup.Failed = failed != 0
+	rollup.Tokens = NormalizeTokenStats(rollup.Tokens)
+	return rollup, nil
+}
+
 func newStatisticsSnapshot() StatisticsSnapshot {
 	return StatisticsSnapshot{
 		APIs:           map[string]APISnapshot{},
@@ -649,13 +855,16 @@ func applyEventToSnapshot(snapshot *StatisticsSnapshot, event scannedUsageEvent)
 	apiName := firstNonEmpty(event.APIGroupKey, event.Provider, event.Endpoint, "unknown")
 	modelName := firstNonEmpty(event.Model, "unknown")
 	detail := RequestDetail{
-		Timestamp: event.Timestamp.UTC(),
-		LatencyMS: event.LatencyMS,
-		Source:    event.Source,
-		AuthIndex: event.AuthIndex,
-		Tokens:    event.Tokens,
-		Failed:    event.Failed,
-		RequestID: event.RequestID,
+		Timestamp:          event.Timestamp.UTC(),
+		LatencyMS:          event.LatencyMS,
+		LatencyTotalMS:     event.LatencyMS,
+		LatencySampleCount: boolInt64(event.LatencyMS > 0),
+		RequestCount:       1,
+		Source:             event.Source,
+		AuthIndex:          event.AuthIndex,
+		Tokens:             event.Tokens,
+		Failed:             event.Failed,
+		RequestID:          event.RequestID,
 	}
 
 	apiSnapshot := snapshot.APIs[apiName]
@@ -665,6 +874,13 @@ func applyEventToSnapshot(snapshot *StatisticsSnapshot, event scannedUsageEvent)
 	modelSnapshot := apiSnapshot.Models[modelName]
 	modelSnapshot.TotalRequests++
 	modelSnapshot.TotalTokens += event.Tokens.TotalTokens
+	if event.Failed {
+		modelSnapshot.FailureCount++
+		apiSnapshot.FailureCount++
+	} else {
+		modelSnapshot.SuccessCount++
+		apiSnapshot.SuccessCount++
+	}
 	modelSnapshot.Details = append(modelSnapshot.Details, detail)
 	apiSnapshot.TotalRequests++
 	apiSnapshot.TotalTokens += event.Tokens.TotalTokens
@@ -687,6 +903,61 @@ func applyEventToSnapshot(snapshot *StatisticsSnapshot, event scannedUsageEvent)
 	snapshot.TokensByHour[hourKey] += event.Tokens.TotalTokens
 }
 
+func applyRollupToSnapshot(snapshot *StatisticsSnapshot, rollup scannedUsageRollup) {
+	apiName := firstNonEmpty(rollup.APIGroupKey, rollup.Provider, rollup.Endpoint, "unknown")
+	modelName := firstNonEmpty(rollup.Model, "unknown")
+	requestCount := rollup.RequestCount
+	if requestCount <= 0 {
+		return
+	}
+	latencyMS := int64(0)
+	if rollup.LatencySampleCount > 0 {
+		latencyMS = rollup.LatencyTotalMS / rollup.LatencySampleCount
+	}
+	detail := RequestDetail{
+		Timestamp:          rollup.BucketStart.UTC(),
+		LatencyMS:          latencyMS,
+		LatencyTotalMS:     rollup.LatencyTotalMS,
+		LatencySampleCount: rollup.LatencySampleCount,
+		RequestCount:       requestCount,
+		Source:             rollup.Source,
+		AuthIndex:          rollup.AuthIndex,
+		Tokens:             rollup.Tokens,
+		Failed:             rollup.Failed,
+	}
+
+	apiSnapshot := snapshot.APIs[apiName]
+	if apiSnapshot.Models == nil {
+		apiSnapshot.Models = map[string]ModelSnapshot{}
+	}
+	modelSnapshot := apiSnapshot.Models[modelName]
+	modelSnapshot.TotalRequests += requestCount
+	modelSnapshot.TotalTokens += rollup.Tokens.TotalTokens
+	apiSnapshot.TotalRequests += requestCount
+	apiSnapshot.TotalTokens += rollup.Tokens.TotalTokens
+	if rollup.Failed {
+		modelSnapshot.FailureCount += requestCount
+		apiSnapshot.FailureCount += requestCount
+		snapshot.FailureCount += requestCount
+	} else {
+		modelSnapshot.SuccessCount += requestCount
+		apiSnapshot.SuccessCount += requestCount
+		snapshot.SuccessCount += requestCount
+	}
+	modelSnapshot.Details = append(modelSnapshot.Details, detail)
+	apiSnapshot.Models[modelName] = modelSnapshot
+	snapshot.APIs[apiName] = apiSnapshot
+
+	snapshot.TotalRequests += requestCount
+	snapshot.TotalTokens += rollup.Tokens.TotalTokens
+	dayKey := rollup.BucketStart.Format("2006-01-02")
+	hourKey := rollup.BucketStart.Format("15")
+	snapshot.RequestsByDay[dayKey] += requestCount
+	snapshot.RequestsByHour[hourKey] += requestCount
+	snapshot.TokensByDay[dayKey] += rollup.Tokens.TotalTokens
+	snapshot.TokensByHour[hourKey] += rollup.Tokens.TotalTokens
+}
+
 func usageEventsWhere(filter UsageEventsFilter) (string, []any) {
 	clauses := make([]string, 0)
 	args := make([]any, 0)
@@ -706,6 +977,10 @@ func usageEventsWhere(filter UsageEventsFilter) (string, []any) {
 		clauses = append(clauses, "(TRIM(source) = ? OR TRIM(auth_index) = ? OR TRIM(provider) = ?)")
 		args = append(args, source, source, source)
 	}
+	if authIndex := strings.TrimSpace(filter.AuthIndex); authIndex != "" {
+		clauses = append(clauses, "TRIM(auth_index) = ?")
+		args = append(args, authIndex)
+	}
 	switch strings.TrimSpace(filter.Result) {
 	case "success":
 		clauses = append(clauses, "failed = 0")
@@ -719,7 +994,7 @@ func usageEventsWhere(filter UsageEventsFilter) (string, []any) {
 }
 
 func (s *Store) listDistinct(ctx context.Context, column string, filter UsageEventsFilter) ([]string, error) {
-	if column != "model" && column != "source" {
+	if column != "model" && column != "source" && column != "auth_index" {
 		return nil, fmt.Errorf("unsupported distinct column %q", column)
 	}
 	where, args := usageEventsWhere(UsageEventsFilter{
@@ -803,6 +1078,13 @@ func normalizeAuthType(value string) string {
 }
 
 func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func boolInt64(value bool) int64 {
 	if value {
 		return 1
 	}

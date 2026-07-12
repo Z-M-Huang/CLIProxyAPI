@@ -46,6 +46,22 @@ func TestValidatePromptRules_AcceptsEmptyMarkerOnInject(t *testing.T) {
 	}
 }
 
+func TestNormalizePromptRules_MigratesGeminiCLIProtocol(t *testing.T) {
+	cfg := &Config{PromptRules: []PromptRule{{
+		Name:    "legacy-interactions",
+		Enabled: true,
+		Models:  []PayloadModelRule{{Name: "gemini-*", Protocol: " Gemini-CLI "}},
+		Target:  PromptRuleTargetUser,
+		Action:  PromptRuleActionInject,
+		Content: "be concise",
+	}}}
+
+	cfg.NormalizePromptRules()
+	if got := cfg.PromptRules[0].Models[0].Protocol; got != "interactions" {
+		t.Fatalf("protocol = %q, want interactions", got)
+	}
+}
+
 func TestValidatePromptRules_AcceptsMarkerNotInContent(t *testing.T) {
 	// v2: marker no longer needs to appear inside content. The marker is now
 	// an anchor against the target text, not a sentinel embedded in content.

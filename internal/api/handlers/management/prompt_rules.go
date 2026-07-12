@@ -13,9 +13,11 @@ import (
 
 // GetPromptRules returns the current configured prompt rules.
 func (h *Handler) GetPromptRules(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	out := make([]config.PromptRule, 0)
-	if cfg := h.cfg(); cfg != nil {
-		out = append(out, cfg.PromptRules...)
+	if h.cfg != nil {
+		out = append(out, h.cfg.PromptRules...)
 	}
 	if out == nil {
 		out = []config.PromptRule{}
@@ -39,10 +41,6 @@ func (h *Handler) PutPromptRules(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	cur := make([]config.PromptRule, 0)
-	if cfg := h.cfg(); cfg != nil {
-		cur = append(cur, cfg.PromptRules...)
-	}
 	h.applyPromptRulesAndPersist(c, candidate.PromptRules)
 }
 
@@ -65,8 +63,8 @@ func (h *Handler) PatchPromptRule(c *gin.Context) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	cur := make([]config.PromptRule, 0)
-	if cfg := h.cfg(); cfg != nil {
-		cur = append(cur, cfg.PromptRules...)
+	if h.cfg != nil {
+		cur = append(cur, h.cfg.PromptRules...)
 	}
 	targetIdx := -1
 	if body.Index != nil && *body.Index >= 0 && *body.Index < len(cur) {
@@ -100,7 +98,7 @@ func (h *Handler) PatchPromptRule(c *gin.Context) {
 func (h *Handler) DeletePromptRule(c *gin.Context) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	curCfg := h.cfg()
+	curCfg := h.cfg
 	curRules := make([]config.PromptRule, 0)
 	if curCfg != nil {
 		curRules = append(curRules, curCfg.PromptRules...)
@@ -144,14 +142,14 @@ func (h *Handler) DeletePromptRule(c *gin.Context) {
 //
 // Caller MUST already hold h.mu.
 func (h *Handler) applyPromptRulesAndPersist(c *gin.Context, next []config.PromptRule) {
-	cur := h.cfg()
+	cur := h.cfg
 	prev := make([]config.PromptRule, 0)
 	if cur != nil {
 		prev = append(prev, cur.PromptRules...)
 	}
 
-	clone, err := cloneConfigSnapshot(cur)
-	if err != nil {
+	clone := cur.CloneForRuntime()
+	if clone == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to clone config"})
 		return
 	}
@@ -164,9 +162,9 @@ func (h *Handler) applyPromptRulesAndPersist(c *gin.Context, next []config.Promp
 		return
 	}
 
-	h.cfgValue = clone
-	h.cfgPtr.Store(clone)
-	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), clone)
+	h.cfg = clone
+	snapshot := h.reloadSnapshotConfigLocked()
+	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), snapshot)
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 

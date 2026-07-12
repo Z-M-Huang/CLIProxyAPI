@@ -13,7 +13,7 @@ import (
 
 func TestAuthenticateManagementKey_LocalhostIPBan_BlocksCorrectKeyDuringBan(t *testing.T) {
 	h := &Handler{
-		cfgValue:       &config.Config{},
+		cfg:            &config.Config{},
 		failedAttempts: make(map[string]*attemptInfo),
 		envSecret:      "test-secret",
 	}
@@ -41,10 +41,9 @@ func TestAuthenticateManagementKey_LocalhostIPBan_BlocksCorrectKeyDuringBan(t *t
 }
 
 func TestMiddlewareSetsSupportPluginHeader(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	h := &Handler{
-		cfgValue:       &config.Config{},
+		cfg:            &config.Config{},
 		failedAttempts: make(map[string]*attemptInfo),
 		envSecret:      "test-secret",
 	}
