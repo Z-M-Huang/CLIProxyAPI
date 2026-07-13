@@ -2060,6 +2060,14 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		models = applyExcludedModels(models, excluded)
 	case "xai":
 		models = registry.GetXAIModels()
+		if entry := resolveConfigXAIKey(cfg, a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildXAIConfigModels(entry)
+			}
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
 		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
@@ -2370,13 +2378,31 @@ func resolveConfigCodexKey(cfg *config.Config, auth *coreauth.Auth) *config.Code
 	if auth == nil || cfg == nil {
 		return nil
 	}
+	return resolveConfigCodexStyleKey(auth, cfg.CodexKey)
+}
+
+func (s *Service) resolveConfigXAIKey(auth *coreauth.Auth) *config.XAIKey {
+	return resolveConfigXAIKey(s.configSnapshot(), auth)
+}
+
+func resolveConfigXAIKey(cfg *config.Config, auth *coreauth.Auth) *config.XAIKey {
+	if auth == nil || cfg == nil {
+		return nil
+	}
+	return resolveConfigCodexStyleKey(auth, cfg.XAIKey)
+}
+
+func resolveConfigCodexStyleKey(auth *coreauth.Auth, entries []config.CodexKey) *config.CodexKey {
+	if auth == nil {
+		return nil
+	}
 	var attrKey, attrBase string
 	if auth.Attributes != nil {
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
 	}
-	for i := range cfg.CodexKey {
-		entry := &cfg.CodexKey[i]
+	for i := range entries {
+		entry := &entries[i]
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
 		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
@@ -2662,6 +2688,13 @@ func buildClaudeConfigModels(entry *config.ClaudeKey) []*ModelInfo {
 		return nil
 	}
 	return buildConfigModels(entry.Models, "anthropic", "claude")
+}
+
+func buildXAIConfigModels(entry *config.XAIKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, "xai", "xai")
 }
 
 func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
