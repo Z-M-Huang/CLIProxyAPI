@@ -616,7 +616,6 @@ func (e *KimiExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 }
 
 // applyKimiHeaders sets required headers for Kimi API requests.
-// Headers match kimi-cli client for compatibility.
 func applyKimiHeaders(r *http.Request, token string, stream bool, cfg *config.Config) {
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer "+token)
