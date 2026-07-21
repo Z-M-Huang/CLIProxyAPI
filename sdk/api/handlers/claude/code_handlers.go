@@ -58,7 +58,7 @@ func (h *ClaudeCodeAPIHandler) HandlerType() string {
 func (h *ClaudeCodeAPIHandler) Models() []map[string]any {
 	// Get dynamic models from the global registry
 	modelRegistry := registry.GetGlobalRegistry()
-	return modelRegistry.GetAvailableModels("claude")
+	return h.AddModelRouteAliases(modelRegistry.GetAvailableModels("claude"), "claude")
 }
 
 // ClaudeMessages handles Claude-compatible streaming chat completions.
@@ -418,7 +418,7 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 	}
 	if msg != nil && msg.Addon != nil && handlers.PassthroughHeadersEnabled(h.Cfg) {
 		for key, values := range msg.Addon {
-			if len(values) == 0 {
+			if len(values) == 0 || handlers.IsCPAReservedResponseHeader(key) {
 				continue
 			}
 			c.Writer.Header().Del(key)

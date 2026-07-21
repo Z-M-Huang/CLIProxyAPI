@@ -46,19 +46,20 @@ type TokenStats struct {
 }
 
 type UsageEvent struct {
-	EventKey    string
-	APIGroupKey string
-	Provider    string
-	Endpoint    string
-	AuthType    string
-	RequestID   string
-	Model       string
-	Timestamp   time.Time
-	Source      string
-	AuthIndex   string
-	Failed      bool
-	LatencyMS   int64
-	Tokens      TokenStats
+	EventKey       string
+	APIGroupKey    string
+	Provider       string
+	Endpoint       string
+	AuthType       string
+	RequestID      string
+	Model          string
+	RequestedModel string
+	Timestamp      time.Time
+	Source         string
+	AuthIndex      string
+	Failed         bool
+	LatencyMS      int64
+	Tokens         TokenStats
 }
 
 type RequestDetail struct {
@@ -110,19 +111,20 @@ type MergeResult struct {
 }
 
 type UsageEventRecord struct {
-	ID          int64      `json:"id"`
-	Timestamp   time.Time  `json:"timestamp"`
-	APIGroupKey string     `json:"api_group_key"`
-	Provider    string     `json:"provider"`
-	Endpoint    string     `json:"endpoint"`
-	AuthType    string     `json:"auth_type"`
-	RequestID   string     `json:"request_id"`
-	Model       string     `json:"model"`
-	Source      string     `json:"source"`
-	AuthIndex   string     `json:"auth_index"`
-	Failed      bool       `json:"failed"`
-	LatencyMS   int64      `json:"latency_ms"`
-	Tokens      TokenStats `json:"tokens"`
+	ID             int64      `json:"id"`
+	Timestamp      time.Time  `json:"timestamp"`
+	APIGroupKey    string     `json:"api_group_key"`
+	Provider       string     `json:"provider"`
+	Endpoint       string     `json:"endpoint"`
+	AuthType       string     `json:"auth_type"`
+	RequestID      string     `json:"request_id"`
+	Model          string     `json:"model"`
+	RequestedModel string     `json:"requested_model,omitempty"`
+	Source         string     `json:"source"`
+	AuthIndex      string     `json:"auth_index"`
+	Failed         bool       `json:"failed"`
+	LatencyMS      int64      `json:"latency_ms"`
+	Tokens         TokenStats `json:"tokens"`
 }
 
 type UsageEventsPage struct {
@@ -315,10 +317,10 @@ func (s *Store) InsertUsageEvent(ctx context.Context, event UsageEvent) (bool, e
 	}
 
 	_, err = tx.ExecContext(ctx, `INSERT INTO usage_events (
-		event_key, api_group_key, provider, endpoint, auth_type, request_id, model, timestamp,
+		event_key, api_group_key, provider, endpoint, auth_type, request_id, model, requested_model, timestamp,
 		source, auth_index, failed, latency_ms, input_tokens, output_tokens, reasoning_tokens,
 		cached_tokens, cache_read_tokens, cache_creation_tokens, total_tokens, created_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.EventKey,
 		event.APIGroupKey,
 		event.Provider,
@@ -326,6 +328,7 @@ func (s *Store) InsertUsageEvent(ctx context.Context, event UsageEvent) (bool, e
 		event.AuthType,
 		event.RequestID,
 		event.Model,
+		event.RequestedModel,
 		formatTime(event.Timestamp),
 		event.Source,
 		event.AuthIndex,
@@ -420,7 +423,7 @@ func (s *Store) BuildSnapshot(ctx context.Context) (StatisticsSnapshot, error) {
 		return snapshot, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id, event_key, api_group_key, provider, endpoint, auth_type, request_id,
-		model, timestamp, source, auth_index, failed, latency_ms, input_tokens, output_tokens,
+		model, requested_model, timestamp, source, auth_index, failed, latency_ms, input_tokens, output_tokens,
 		reasoning_tokens, cached_tokens, cache_read_tokens, cache_creation_tokens, total_tokens
 		FROM usage_events ORDER BY timestamp ASC, id ASC`)
 	if err != nil {
@@ -491,7 +494,7 @@ func (s *Store) ListUsageEvents(ctx context.Context, filter UsageEventsFilter) (
 	queryArgs := append([]any(nil), args...)
 	queryArgs = append(queryArgs, pageSize, (page-1)*pageSize)
 	rows, err := s.db.QueryContext(ctx, `SELECT id, event_key, api_group_key, provider, endpoint, auth_type, request_id,
-		model, timestamp, source, auth_index, failed, latency_ms, input_tokens, output_tokens,
+		model, requested_model, timestamp, source, auth_index, failed, latency_ms, input_tokens, output_tokens,
 		reasoning_tokens, cached_tokens, cache_read_tokens, cache_creation_tokens, total_tokens
 		FROM usage_events`+where+` ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
@@ -506,19 +509,20 @@ func (s *Store) ListUsageEvents(ctx context.Context, filter UsageEventsFilter) (
 			return UsageEventsPage{}, errScan
 		}
 		events = append(events, UsageEventRecord{
-			ID:          event.ID,
-			Timestamp:   event.Timestamp,
-			APIGroupKey: event.APIGroupKey,
-			Provider:    event.Provider,
-			Endpoint:    event.Endpoint,
-			AuthType:    event.AuthType,
-			RequestID:   event.RequestID,
-			Model:       event.Model,
-			Source:      event.Source,
-			AuthIndex:   event.AuthIndex,
-			Failed:      event.Failed,
-			LatencyMS:   event.LatencyMS,
-			Tokens:      event.Tokens,
+			ID:             event.ID,
+			Timestamp:      event.Timestamp,
+			APIGroupKey:    event.APIGroupKey,
+			Provider:       event.Provider,
+			Endpoint:       event.Endpoint,
+			AuthType:       event.AuthType,
+			RequestID:      event.RequestID,
+			Model:          event.Model,
+			RequestedModel: event.RequestedModel,
+			Source:         event.Source,
+			AuthIndex:      event.AuthIndex,
+			Failed:         event.Failed,
+			LatencyMS:      event.LatencyMS,
+			Tokens:         event.Tokens,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -684,6 +688,7 @@ func NormalizeUsageEvent(event UsageEvent) UsageEvent {
 	event.AuthType = normalizeAuthType(event.AuthType)
 	event.RequestID = strings.TrimSpace(event.RequestID)
 	event.Model = firstNonEmpty(event.Model, "unknown")
+	event.RequestedModel = strings.TrimSpace(event.RequestedModel)
 	event.Timestamp = event.Timestamp.UTC()
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
@@ -714,13 +719,14 @@ func NormalizeTokenStats(tokens TokenStats) TokenStats {
 func BuildEventKey(event UsageEvent) string {
 	tokens := NormalizeTokenStats(event.Tokens)
 	payload := fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d|%d|%d",
+		"%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d|%d|%d",
 		strings.TrimSpace(event.APIGroupKey),
 		strings.TrimSpace(event.Provider),
 		strings.TrimSpace(event.Endpoint),
 		strings.TrimSpace(event.AuthType),
 		strings.TrimSpace(event.RequestID),
 		strings.TrimSpace(event.Model),
+		strings.TrimSpace(event.RequestedModel),
 		event.Timestamp.UTC().Format(time.RFC3339Nano),
 		strings.TrimSpace(event.Source),
 		strings.TrimSpace(event.AuthIndex),
@@ -738,20 +744,21 @@ func BuildEventKey(event UsageEvent) string {
 }
 
 type scannedUsageEvent struct {
-	ID          int64
-	EventKey    string
-	APIGroupKey string
-	Provider    string
-	Endpoint    string
-	AuthType    string
-	RequestID   string
-	Model       string
-	Timestamp   time.Time
-	Source      string
-	AuthIndex   string
-	Failed      bool
-	LatencyMS   int64
-	Tokens      TokenStats
+	ID             int64
+	EventKey       string
+	APIGroupKey    string
+	Provider       string
+	Endpoint       string
+	AuthType       string
+	RequestID      string
+	Model          string
+	RequestedModel string
+	Timestamp      time.Time
+	Source         string
+	AuthIndex      string
+	Failed         bool
+	LatencyMS      int64
+	Tokens         TokenStats
 }
 
 type scannedUsageRollup struct {
@@ -785,6 +792,7 @@ func scanUsageEvent(rows interface {
 		&event.AuthType,
 		&event.RequestID,
 		&event.Model,
+		&event.RequestedModel,
 		&timestamp,
 		&event.Source,
 		&event.AuthIndex,

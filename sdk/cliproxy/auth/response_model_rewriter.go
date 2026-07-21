@@ -46,6 +46,11 @@ func rewriteModelInResponse(data []byte, targetModel string) []byte {
 	return data
 }
 
+// RewriteModelInResponse rewrites known model fields in a JSON response payload.
+func RewriteModelInResponse(data []byte, targetModel string) []byte {
+	return rewriteModelInResponse(data, targetModel)
+}
+
 // StreamRewriteOptions configures the stream rewriter.
 type StreamRewriteOptions struct {
 	RewriteModel string

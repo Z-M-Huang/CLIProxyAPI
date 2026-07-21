@@ -111,13 +111,20 @@ Fork-owned files:
 - `.githooks/pre-commit`
 - `scripts/check_fork_boundary.sh`
 - `README.md`, `README_CN.md`, `README_JA.md`
+- `internal/config/model_routes.go`
+- `internal/config/model_routes_test.go`
 - `internal/config/prompt_rules.go`
 - `internal/config/prompt_rules_test.go`
+- `internal/api/handlers/management/model_routes.go`
+- `internal/api/handlers/management/model_routes_test.go`
 - `internal/api/handlers/management/prompt_rules.go`
 - `internal/api/handlers/management/prompt_rules_test.go`
 - `internal/logging/async_emitter*.go`, `internal/logging/request_logger_bench_test.go`, `internal/logging/sqlite_request_logger.go`
 - `internal/cache/signature_cache_{bench,semantics}_test.go`
 - `internal/managementasset/fork_provider.go`, `internal/managementasset/updater_release_url_test.go`
+- `sdk/api/handlers/configured_model_routes.go`
+- `sdk/api/handlers/configured_model_routes_test.go`
+- `sdk/api/handlers/model_route_models.go`
 - `internal/runtime/executor/codex_executor_stream_chunkboundary_test.go`
 - `internal/tui/usage_tab*.go`
 - `internal/usage/logger_plugin*.go`
@@ -127,6 +134,7 @@ Fork-owned files:
 - `internal/usagestore/migrations/00001_create_usage_store.sql`
 - `internal/usagestore/migrations/00002_add_cache_token_breakdown.sql`
 - `internal/usagestore/migrations/00003_create_usage_rollups.sql`
+- `internal/usagestore/migrations/00004_add_requested_model.sql`
 - `internal/usagestore/store.go`
 - `internal/usagestore/store_test.go`
 - `internal/runtime/executor/helps/prompt_rules.go`
@@ -143,6 +151,7 @@ Fork-owned files:
 Patched upstream files:
 
 - `.gitignore`
+- `Dockerfile`
 - `cmd/server/main.go`
 - `config.example.yaml`
 - `docker-compose.yml`
@@ -161,6 +170,7 @@ Patched upstream files:
 - `internal/cmd/run.go`
 - `internal/config/config.go`
 - `internal/config/parse.go`
+- `internal/config/sdk_config.go`
 - `internal/config/codex_websocket_header_defaults_test.go`
 - `internal/cache/signature_cache.go`
 - `internal/logging/request_logger.go`
@@ -179,6 +189,13 @@ Patched upstream files:
 - `internal/watcher/dispatcher.go`
 - `sdk/logging/request_logger.go`
 - `sdk/api/handlers/handlers.go`
+- `sdk/api/handlers/model_execution.go`
+- `sdk/api/handlers/openai/openai_handlers.go`
+- `sdk/api/handlers/openai/openai_responses_handlers.go`
+- `sdk/api/handlers/claude/code_handlers.go`
+- `sdk/api/handlers/gemini/gemini_handlers.go`
+- `sdk/cliproxy/auth/response_model_rewriter.go`
+- `sdk/config/config.go`
 - `sdk/cliproxy/service.go`
 - `sdk/cliproxy/builder.go`
 - `sdk/cliproxy/usage/manager.go`
@@ -218,6 +235,7 @@ Use upstream as a source of selected fixes and maintenance, not as a contributio
 
 Current fork topics:
 
+- `model-routes`: configured model aliases with priority or round-robin failover, route alias model-list exposure, requested-model usage tracking, and management UI wiring.
 - `prompt-rules`: fork-owned prompt-rule type and validation cluster extracted from `internal/config/config.go`.
 - `management-asset`: fork release feed and fallback asset wiring for `management.html`.
 - `releases`: `zmh-v*` tag namespace and fork repo links.

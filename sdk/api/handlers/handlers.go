@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
@@ -261,8 +262,10 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	// Only include it if the client explicitly provides it.
 	key := ""
 	requestPath := ""
+	var ginCtx *gin.Context
 	if ctx != nil {
-		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		if requestGinCtx, ok := ctx.Value("gin").(*gin.Context); ok && requestGinCtx != nil && requestGinCtx.Request != nil {
+			ginCtx = requestGinCtx
 			key = strings.TrimSpace(ginCtx.GetHeader("Idempotency-Key"))
 			requestPath = strings.TrimSpace(ginCtx.FullPath())
 			if requestPath == "" && ginCtx.Request.URL != nil {
@@ -283,6 +286,11 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	}
 	if selectedCallback := selectedAuthIDCallbackFromContext(ctx); selectedCallback != nil {
 		meta[coreexecutor.SelectedAuthCallbackMetadataKey] = selectedCallback
+	}
+	if ginCtx != nil && !websocket.IsWebSocketUpgrade(ginCtx.Request) {
+		if traceCallback := logging.GinCPATraceIDCallback(ginCtx); traceCallback != nil {
+			meta[coreexecutor.SelectedAuthIndexCallbackMetadataKey] = traceCallback
+		}
 	}
 	if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
 		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
@@ -328,7 +336,7 @@ func setServiceTierMetadata(meta map[string]any, rawJSON []byte) {
 	if meta == nil {
 		return
 	}
-	serviceTier := coreusage.DefaultServiceTier
+	serviceTier := coreusage.AutoServiceTier
 	node := gjson.GetBytes(rawJSON, "service_tier")
 	if node.Exists() {
 		value := strings.TrimSpace(node.String())
@@ -337,6 +345,19 @@ func setServiceTierMetadata(meta map[string]any, rawJSON []byte) {
 		}
 	}
 	meta[coreexecutor.ServiceTierMetadataKey] = serviceTier
+}
+
+func setGenerateMetadata(meta map[string]any, rawJSON []byte) {
+	if meta == nil {
+		return
+	}
+	// Missing or true means generation is enabled; only an explicit false disables generation.
+	generate := true
+	node := gjson.GetBytes(rawJSON, "generate")
+	if node.Exists() && node.IsBool() && !node.Bool() {
+		generate = false
+	}
+	meta[coreexecutor.GenerateMetadataKey] = generate
 }
 
 // headersFromContext extracts the original HTTP request headers from the gin context
@@ -431,6 +452,8 @@ type BaseAPIHandler struct {
 	// ModelRouterHost optionally routes matching requests to a plugin executor, the router's own
 	// executor, or a built-in provider before model-to-provider resolution and auth selection.
 	ModelRouterHost PluginModelRouterHost
+
+	modelRouteRuntime *configuredModelRouteRuntime
 }
 
 // NewBaseAPIHandlers creates a new API handlers instance.
@@ -443,10 +466,12 @@ type BaseAPIHandler struct {
 // Returns:
 //   - *BaseAPIHandler: A new API handlers instance
 func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *BaseAPIHandler {
-	return &BaseAPIHandler{
+	h := &BaseAPIHandler{
 		Cfg:         cfg,
 		AuthManager: authManager,
 	}
+	h.modelRouteRuntime = newConfiguredModelRouteRuntime(cfg)
+	return h
 }
 
 // UpdateClients updates the handlers' client list and configuration.
@@ -455,7 +480,14 @@ func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *B
 // Parameters:
 //   - clients: The new slice of AI service clients
 //   - cfg: The new application configuration
-func (h *BaseAPIHandler) UpdateClients(cfg *config.SDKConfig) { h.Cfg = cfg }
+func (h *BaseAPIHandler) UpdateClients(cfg *config.SDKConfig) {
+	h.Cfg = cfg
+	if h.modelRouteRuntime == nil {
+		h.modelRouteRuntime = newConfiguredModelRouteRuntime(cfg)
+		return
+	}
+	h.modelRouteRuntime.Sync(cfg)
+}
 
 // SetPluginHost configures the optional plugin interceptor host.
 func (h *BaseAPIHandler) SetPluginHost(host PluginInterceptorHost) {
@@ -730,6 +762,9 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 
 func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	originalRequestedModel := modelName
+	if override := strings.TrimSpace(execOptions.RequestedModelOverride); override != "" {
+		originalRequestedModel = override
+	}
 	routeDecision := h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, false, execOptions)
 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
 	if errMsg := validateNativeInteractionsExecution(entryProtocol, execOptions, routeDecision); errMsg != nil {
@@ -737,6 +772,11 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	}
 	if routeDecision.ExecutorPluginID != "" {
 		return h.executeWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
+	}
+	if !execOptions.SkipConfiguredModelRoute && !allowImageModel && strings.TrimSpace(execOptions.ForcedProvider) == "" && routeDecision.Provider == "" {
+		if route, ok := h.configuredModelRouteForExecution(modelName); ok {
+			return h.executeConfiguredModelRoute(ctx, entryProtocol, exitProtocol, route, originalRequestedModel, rawJSON, alt, execOptions)
+		}
 	}
 	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
 	if errMsg != nil {
@@ -749,6 +789,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	addModelExecutionSourceMetadata(reqMeta, execOptions.InternalSource)
 	setReasoningEffortMetadata(reqMeta, entryProtocol, normalizedModel, rawJSON)
 	setServiceTierMetadata(reqMeta, rawJSON)
+	setGenerateMetadata(reqMeta, rawJSON)
 	payload := applyConfiguredPromptRules(rawJSON, entryProtocol, normalizedModel, reqMeta, alt)
 	if len(payload) == 0 {
 		payload = nil
@@ -802,9 +843,17 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 
 func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	originalRequestedModel := modelName
+	if override := strings.TrimSpace(execOptions.RequestedModelOverride); override != "" {
+		originalRequestedModel = override
+	}
 	routeDecision := h.applyModelRouter(ctx, handlerType, modelName, rawJSON, false, execOptions)
 	if routeDecision.ExecutorPluginID != "" {
 		return h.countWithPluginExecutor(ctx, handlerType, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
+	}
+	if !execOptions.SkipConfiguredModelRoute && strings.TrimSpace(execOptions.ForcedProvider) == "" && routeDecision.Provider == "" {
+		if route, ok := h.configuredModelRouteForExecution(modelName); ok {
+			return h.countConfiguredModelRoute(ctx, handlerType, route, originalRequestedModel, rawJSON, alt, execOptions)
+		}
 	}
 	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, false, routeDecision, execOptions)
 	if errMsg != nil {
@@ -816,6 +865,7 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	addAuthSelectionModelMetadata(reqMeta, execOptions.AuthSelectionModel)
 	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
 	setServiceTierMetadata(reqMeta, rawJSON)
+	setGenerateMetadata(reqMeta, rawJSON)
 	payload := applyConfiguredPromptRules(rawJSON, handlerType, normalizedModel, reqMeta, alt)
 	if len(payload) == 0 {
 		payload = nil
@@ -903,6 +953,7 @@ func (h *BaseAPIHandler) pluginExecutorRequest(ctx context.Context, entryProtoco
 	addModelExecutionSourceMetadata(reqMeta, execOptions.InternalSource)
 	setReasoningEffortMetadata(reqMeta, entryProtocol, modelName, rawJSON)
 	setServiceTierMetadata(reqMeta, rawJSON)
+	setGenerateMetadata(reqMeta, rawJSON)
 	payload := applyConfiguredPromptRules(rawJSON, entryProtocol, modelName, reqMeta, alt)
 	if len(payload) == 0 {
 		payload = nil
@@ -1125,6 +1176,9 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 
 func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
 	originalRequestedModel := modelName
+	if override := strings.TrimSpace(execOptions.RequestedModelOverride); override != "" {
+		originalRequestedModel = override
+	}
 	routeDecision := h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, true, execOptions)
 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
 	if errMsg := validateNativeInteractionsExecution(entryProtocol, execOptions, routeDecision); errMsg != nil {
@@ -1135,6 +1189,11 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	}
 	if routeDecision.ExecutorPluginID != "" {
 		return h.streamWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
+	}
+	if !execOptions.SkipConfiguredModelRoute && !allowImageModel && strings.TrimSpace(execOptions.ForcedProvider) == "" && routeDecision.Provider == "" {
+		if route, ok := h.configuredModelRouteForExecution(modelName); ok {
+			return h.streamConfiguredModelRoute(ctx, entryProtocol, exitProtocol, route, originalRequestedModel, rawJSON, alt, execOptions)
+		}
 	}
 	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
 	if errMsg != nil {
@@ -1150,6 +1209,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	addModelExecutionSourceMetadata(reqMeta, execOptions.InternalSource)
 	setReasoningEffortMetadata(reqMeta, entryProtocol, normalizedModel, rawJSON)
 	setServiceTierMetadata(reqMeta, rawJSON)
+	setGenerateMetadata(reqMeta, rawJSON)
 	payload := applyConfiguredPromptRules(rawJSON, entryProtocol, normalizedModel, reqMeta, alt)
 	if len(payload) == 0 {
 		payload = nil
@@ -1901,6 +1961,9 @@ func modelRoutersEnabled(host PluginModelRouterHost, skipPluginID string) bool {
 
 func (h *BaseAPIHandler) applyModelRouter(ctx context.Context, handlerType, modelName string, rawJSON []byte, stream bool, execOptions modelExecutionOptions) modelRouteDecision {
 	var decision modelRouteDecision
+	if execOptions.DisablePluginModelRouter {
+		return decision
+	}
 	host := h.modelRouterHost()
 	if host == nil || !modelRoutersEnabled(host, execOptions.SkipRouterPluginID) {
 		return decision
@@ -2193,7 +2256,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	}
 	if msg != nil && msg.Addon != nil && PassthroughHeadersEnabled(h.Cfg) {
 		for key, values := range msg.Addon {
-			if len(values) == 0 {
+			if len(values) == 0 || IsCPAReservedResponseHeader(key) {
 				continue
 			}
 			c.Writer.Header().Del(key)

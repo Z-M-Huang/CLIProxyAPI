@@ -76,12 +76,16 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	}
 
 	cfg.NormalizePluginsConfig()
+	if errResolvePluginsDir := cfg.ResolvePluginsDir(); errResolvePluginsDir != nil && cfg.Plugins.Enabled {
+		return nil, errResolvePluginsDir
+	}
 
 	// Apply the same sanitization pipeline.
 	cfg.SanitizeGeminiKeys()
 	cfg.SanitizeInteractionsKeys()
 	cfg.SanitizeVertexCompatKeys()
 	cfg.SanitizeCodexKeys()
+	cfg.SanitizeXAIKeys()
 	cfg.SanitizeCodexHeaderDefaults()
 	cfg.SanitizeGeminiHeaderDefaults()
 	cfg.SanitizeClaudeHeaderDefaults()
@@ -93,6 +97,10 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
 	cfg.SanitizeOAuthModelAlias()
 	cfg.SanitizePayloadRules()
+	cfg.NormalizeModelRoutes()
+	if err := cfg.ValidateModelRoutes(); err != nil {
+		return nil, err
+	}
 
 	return &cfg, nil
 }
