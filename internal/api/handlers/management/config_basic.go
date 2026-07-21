@@ -126,6 +126,11 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_prompt_rules", "message": err.Error()})
 		return
 	}
+	cfg.NormalizeModelRoutes()
+	if err = cfg.ValidateModelRoutes(); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_model_routes", "message": err.Error()})
+		return
+	}
 	h.mu.Lock()
 	prevRules := append([]config.PromptRule(nil), h.cfg.PromptRules...)
 	h.mu.Unlock()

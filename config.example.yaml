@@ -117,6 +117,16 @@ proxy-url: ""
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
 force-model-prefix: false
 
+# Optional client-facing model aliases with built-in failover across concrete models.
+# model-routes:
+#   - alias: "auto"
+#     strategy: "priority" # priority or round-robin
+#     cooldown-seconds: 60 # failed targets stay out of rotation for this many seconds
+#     models:
+#       - "gpt-5.4-mini"
+#       - "claude-sonnet-4-5"
+#       - "gemini-2.5-pro(8192)" # target suffix wins over request suffix
+
 # When true, forward filtered upstream response headers to downstream clients.
 # Default is false (disabled).
 passthrough-headers: false

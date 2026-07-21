@@ -29,6 +29,7 @@ const (
 	defaultManagementReleaseURL  = "https://api.github.com/repos/router-for-me/Cli-Proxy-API-Management-Center/releases/latest"
 	defaultManagementFallbackURL = "https://cpamc.router-for.me/"
 	managementAssetName          = "management.html"
+	managementPanelReleaseURLEnv = "MANAGEMENT_PANEL_RELEASE_URL"
 	httpUserAgent                = "CLIProxyAPI-management-updater"
 	managementSyncMinInterval    = 30 * time.Second
 	updateCheckInterval          = 3 * time.Hour
@@ -359,21 +360,35 @@ func ensureFallbackManagementHTML(ctx context.Context, client *http.Client, loca
 }
 
 func resolveReleaseURL(repo string) string {
+	if override := strings.TrimSpace(os.Getenv(managementPanelReleaseURLEnv)); override != "" {
+		return normalizeReleaseURL(override, currentReleaseURL())
+	}
+	return normalizeReleaseURL(repo, currentReleaseURL())
+}
+
+func normalizeReleaseURL(repo string, fallback string) string {
 	repo = strings.TrimSpace(repo)
 	if repo == "" {
-		return currentReleaseURL()
+		return fallback
 	}
 
 	parsed, err := url.Parse(repo)
 	if err != nil || parsed.Host == "" {
-		return currentReleaseURL()
+		return fallback
 	}
 
 	host := strings.ToLower(parsed.Host)
 	parsed.Path = strings.TrimSuffix(parsed.Path, "/")
 
 	if host == "api.github.com" {
-		if !strings.HasSuffix(strings.ToLower(parsed.Path), "/releases/latest") {
+		pathLower := strings.ToLower(parsed.Path)
+		if strings.Contains(pathLower, "/releases/tags/") ||
+			strings.HasSuffix(pathLower, "/releases/latest") {
+			return parsed.String()
+		}
+		if strings.HasSuffix(pathLower, "/releases") {
+			parsed.Path = parsed.Path + "/latest"
+		} else {
 			parsed.Path = parsed.Path + "/releases/latest"
 		}
 		return parsed.String()
@@ -383,11 +398,18 @@ func resolveReleaseURL(repo string) string {
 		parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
 		if len(parts) >= 2 && parts[0] != "" && parts[1] != "" {
 			repoName := strings.TrimSuffix(parts[1], ".git")
+			if len(parts) >= 5 &&
+				strings.EqualFold(parts[2], "releases") &&
+				strings.EqualFold(parts[3], "tag") &&
+				strings.TrimSpace(parts[4]) != "" {
+				tag := strings.Join(parts[4:], "/")
+				return fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s", parts[0], repoName, tag)
+			}
 			return fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", parts[0], repoName)
 		}
 	}
 
-	return currentReleaseURL()
+	return fallback
 }
 
 func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL string) (*releaseAsset, string, error) {

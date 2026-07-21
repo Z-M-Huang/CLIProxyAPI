@@ -15,13 +15,16 @@ const (
 )
 
 type modelExecutionOptions struct {
-	Headers                 http.Header
-	Query                   url.Values
-	InternalSource          bool
-	SkipInterceptorPluginID string
-	SkipRouterPluginID      string
-	ForcedProvider          string
-	AuthSelectionModel      string
+	Headers                  http.Header
+	Query                    url.Values
+	InternalSource           bool
+	SkipInterceptorPluginID  string
+	SkipRouterPluginID       string
+	DisablePluginModelRouter bool
+	SkipConfiguredModelRoute bool
+	RequestedModelOverride   string
+	ForcedProvider           string
+	AuthSelectionModel       string
 }
 
 // ProtocolExecutionRequest describes a route-level model execution request with explicit protocols.

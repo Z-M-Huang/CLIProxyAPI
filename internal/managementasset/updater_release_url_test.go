@@ -83,6 +83,51 @@ func TestResolveReleaseURL_UsesProviderDefault(t *testing.T) {
 	}
 }
 
+func TestResolveReleaseURL_AcceptsExplicitReleaseURLs(t *testing.T) {
+	t.Cleanup(func() { SetReleaseURLProvider(nil) })
+
+	tests := []struct {
+		name string
+		repo string
+		want string
+	}{
+		{
+			name: "api tag release",
+			repo: "https://api.github.com/repos/Z-M-Huang/Cli-Proxy-API-Management-Center/releases/tags/zmh-v1.2.0-rc.0",
+			want: "https://api.github.com/repos/Z-M-Huang/Cli-Proxy-API-Management-Center/releases/tags/zmh-v1.2.0-rc.0",
+		},
+		{
+			name: "github tag release",
+			repo: "https://github.com/Z-M-Huang/Cli-Proxy-API-Management-Center/releases/tag/zmh-v1.2.0-rc.0",
+			want: "https://api.github.com/repos/Z-M-Huang/Cli-Proxy-API-Management-Center/releases/tags/zmh-v1.2.0-rc.0",
+		},
+		{
+			name: "api releases collection",
+			repo: "https://api.github.com/repos/Z-M-Huang/Cli-Proxy-API-Management-Center/releases",
+			want: "https://api.github.com/repos/Z-M-Huang/Cli-Proxy-API-Management-Center/releases/latest",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveReleaseURL(tt.repo); got != tt.want {
+				t.Fatalf("resolveReleaseURL(%q) = %q, want %q", tt.repo, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveReleaseURL_EnvOverrideWins(t *testing.T) {
+	t.Cleanup(func() { SetReleaseURLProvider(nil) })
+
+	override := "https://api.github.com/repos/Z-M-Huang/Cli-Proxy-API-Management-Center/releases/tags/zmh-v1.2.0-rc.0"
+	t.Setenv(managementPanelReleaseURLEnv, override)
+
+	if got := resolveReleaseURL("https://github.com/other/explicit"); got != override {
+		t.Fatalf("resolveReleaseURL() with %s = %q, want %q", managementPanelReleaseURLEnv, got, override)
+	}
+}
+
 type stubReleaseURLProvider struct {
 	release  string
 	fallback string

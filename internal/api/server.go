@@ -898,6 +898,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/prompt-rules", s.mgmt.PatchPromptRule)
 		mgmt.DELETE("/prompt-rules", s.mgmt.DeletePromptRule)
 
+		// FORK[model-routes]: management surface for logical model aliases.
+		mgmt.GET("/model-routes", s.mgmt.GetModelRoutes)
+		mgmt.PUT("/model-routes", s.mgmt.PutModelRoutes)
+
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
 		mgmt.PATCH("/gemini-api-key", s.mgmt.PatchGeminiKey)

@@ -63,20 +63,22 @@ Conflicts during a sync are expected only in the customization surface below. **
 
 These are the files where the fork diverges from upstream. When syncing upstream, conflicts here are normal — keep our version. Everywhere else, take upstream's.
 
-- `Dockerfile` — currently aligned with upstream; reserved for future fork-specific bake steps.
+- `Dockerfile` — fork image build metadata plus optional `MANAGEMENT_PANEL_RELEASE_URL` pinning for prerelease UI test images.
 - `.gitignore` — ignores local persistent data files.
 - `docker-compose.yml` — registry default (`zhironghuang/cli-proxy-api`).
 - `docker-build.sh`, `docker-build.ps1` — local image tag.
-- `config.example.yaml` — fork panel repository, SQLite usage settings, Prompt Rules, and provider header defaults.
-- `internal/config/{config,parse}.go` — fork panel defaults, SQLite usage settings, Prompt Rules snapshots, and provider header compatibility.
+- `config.example.yaml` — fork panel repository, SQLite usage settings, Prompt Rules, Model Routes, and provider header defaults.
+- `internal/config/{config,parse,sdk_config,model_routes*}.go` — fork panel defaults, SQLite usage settings, Prompt Rules and Model Routes snapshots, and provider header compatibility.
 - `go.mod`, `go.sum` — fork-only SQLite/goose dependencies for persistent usage history.
-- `internal/managementasset/updater.go` — `defaultManagementReleaseURL`; the upstream `cpamc.router-for.me` fallback is intentionally absent.
+- `internal/managementasset/{updater,fork_provider}.go`, `internal/managementasset/updater_release_url_test.go` — fork release feed, fallback asset wiring, and explicit prerelease release URL override for test images.
 - `internal/api/handlers/management/config_basic.go` — `latestReleaseURL` (the `/v0/management/latest-version` endpoint).
 - `internal/usagestore/**`, `internal/usagepersist/plugin*.go`, `internal/logging/sqlite_request_logger.go` — persistent SQLite raw events, 15-minute rollups, retained dedup keys, and request histories.
 - `internal/logging/{async_emitter,request_logger}.go` and focused tests — asynchronous file logging with lossless forced-error writes and explicit flush/close behavior.
 - `internal/config/prompt_rules*.go`, `internal/runtime/executor/helps/prompt_rules*.go`, `internal/api/handlers/management/prompt_rules*.go` — Prompt Rules validation, protocol rewriting, and management API.
-- `internal/api/server.go`, `internal/cmd/run.go`, `internal/api/handlers/management/{handler,logs,usage,prompt_rules}.go`, `internal/api/handlers/management/usage_test.go` — wires SQLite usage and Prompt Rules into the server and management API.
-- `sdk/api/handlers/handlers.go` — applies Prompt Rules before built-in or plugin execution while preserving the raw client request.
+- `internal/api/handlers/management/model_routes*.go` — Model Routes management API.
+- `internal/api/server.go`, `internal/cmd/run.go`, `internal/api/handlers/management/{handler,logs,usage,prompt_rules,model_routes,config_basic}.go`, `internal/api/handlers/management/usage_test.go` — wires SQLite usage, Prompt Rules, and Model Routes into the server and management API.
+- `sdk/api/handlers/{handlers,model_execution,configured_model_routes*,model_route_models}.go` and provider-specific model list handlers — applies Model Routes after plugin routing, exposes route aliases in `/models`, and preserves requested aliases in responses.
+- `sdk/cliproxy/auth/response_model_rewriter.go` — response model rewriting shared by auth aliases and Model Routes.
 - `internal/tui/{app,client,dashboard,i18n,usage_tab}.go` — persisted Usage view in the terminal UI.
 - `internal/runtime/executor/{gemini,gemini_vertex,openai_compat,kimi,antigravity}_executor.go` and focused tests — provider header defaults; the legacy `gemini-cli-header-defaults` key is read only as a compatibility fallback for `gemini-header-defaults`.
 - `sdk/cliproxy/{builder,service}.go`, `sdk/cliproxy/service_config_race_test.go` — immutable config ownership and stable snapshots for concurrent model registration during hot reload.

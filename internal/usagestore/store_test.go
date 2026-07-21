@@ -42,7 +42,7 @@ func TestStorePersistsUsageEventsAndRequestHistory(t *testing.T) {
 	if !inserted {
 		t.Fatal("InsertUsageEvent() inserted = false, want true")
 	}
-	assertMigrationVersion(t, store, 3)
+	assertMigrationVersion(t, store, 4)
 
 	inserted, err = store.InsertUsageEvent(ctx, event)
 	if err != nil {
@@ -72,7 +72,7 @@ func TestStorePersistsUsageEventsAndRequestHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen Open() error = %v", err)
 	}
-	assertMigrationVersion(t, store, 3)
+	assertMigrationVersion(t, store, 4)
 	defer func() {
 		if errClose := store.Close(); errClose != nil {
 			t.Fatalf("Close() error = %v", errClose)
@@ -211,8 +211,14 @@ func TestStoreMigrationBackfillsExistingUsageEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	if _, err = store.db.Exec("DELETE FROM " + migrationTableName + " WHERE version_id = 3"); err != nil {
-		t.Fatalf("remove v3 migration record: %v", err)
+	if _, err = store.db.Exec("DELETE FROM " + migrationTableName + " WHERE version_id IN (3, 4)"); err != nil {
+		t.Fatalf("remove v3/v4 migration records: %v", err)
+	}
+	if _, err = store.db.Exec("DROP INDEX IF EXISTS idx_usage_events_requested_model"); err != nil {
+		t.Fatalf("drop requested model index: %v", err)
+	}
+	if _, err = store.db.Exec("ALTER TABLE usage_events DROP COLUMN requested_model"); err != nil {
+		t.Fatalf("drop requested_model column: %v", err)
 	}
 	if _, err = store.db.Exec("DROP TABLE usage_rollups"); err != nil {
 		t.Fatalf("drop usage_rollups: %v", err)
@@ -244,7 +250,7 @@ func TestStoreMigrationBackfillsExistingUsageEvents(t *testing.T) {
 			t.Fatalf("Close() error = %v", errClose)
 		}
 	}()
-	assertMigrationVersion(t, store, 3)
+	assertMigrationVersion(t, store, 4)
 
 	overview, err := store.BuildOverview(ctx)
 	if err != nil {

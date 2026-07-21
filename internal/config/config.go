@@ -928,6 +928,12 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
 
+	// FORK[model-routes]: validate configured logical model aliases.
+	cfg.NormalizeModelRoutes()
+	if err := cfg.ValidateModelRoutes(); err != nil {
+		return nil, err
+	}
+
 	// FORK[prompt-rules]: validate and publish runtime prompt-rule snapshots on config load.
 	cfg.SanitizePromptRules()
 
@@ -1376,6 +1382,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-excluded-models")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-model-alias")
+	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "model-routes")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "plugins", "configs")
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
