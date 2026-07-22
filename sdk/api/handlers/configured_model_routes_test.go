@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -28,6 +30,13 @@ func (e *configuredRouteCaptureExecutor) Execute(ctx context.Context, auth *core
 		return e.modelExecutionCaptureExecutor.execute(ctx, auth, req, opts)
 	}
 	return coreexecutor.Response{Payload: []byte(fmt.Sprintf(`{"model":%q}`, req.Model))}, nil
+}
+
+func (e *configuredRouteCaptureExecutor) ExecuteStream(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.mu.Lock()
+	e.models = append(e.models, req.Model)
+	e.mu.Unlock()
+	return e.modelExecutionCaptureExecutor.ExecuteStream(ctx, auth, req, opts)
 }
 
 func (e *configuredRouteCaptureExecutor) executedModels() []string {
@@ -83,6 +92,66 @@ func TestConfiguredModelRoutePriorityFailsOverAndPreservesRequestedSuffix(t *tes
 	}
 	gotModels := executor.executedModels()
 	wantModels := []string{modelA + "(high)", modelB + "(high)"}
+	if fmt.Sprint(gotModels) != fmt.Sprint(wantModels) {
+		t.Fatalf("executed models = %v, want %v", gotModels, wantModels)
+	}
+}
+
+func TestConfiguredModelRouteLateStreamFailureCoolsTargetForNextRequest(t *testing.T) {
+	modelA := "configured-route-stream-a"
+	modelB := "configured-route-stream-b"
+	route := sdkconfig.ModelRoute{
+		Alias:           "auto",
+		Strategy:        sdkconfig.ModelRouteStrategyPriority,
+		CooldownSeconds: 60,
+		Models:          []string{modelA, modelB},
+	}
+	executor := &configuredRouteCaptureExecutor{}
+	executor.stream = func(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+		chunks := make(chan coreexecutor.StreamChunk, 2)
+		chunks <- coreexecutor.StreamChunk{Payload: []byte(fmt.Sprintf(`{"model":%q,"partial":true}`, req.Model))}
+		if req.Model == modelA {
+			chunks <- coreexecutor.StreamChunk{Err: &coreauth.Error{
+				Code:       "rate_limit_exceeded",
+				Message:    "quota",
+				Retryable:  true,
+				HTTPStatus: http.StatusTooManyRequests,
+			}}
+		}
+		close(chunks)
+		return &coreexecutor.StreamResult{Chunks: chunks}, nil
+	}
+	handler := newConfiguredRouteHandler(t, &sdkconfig.SDKConfig{ModelRoutes: []sdkconfig.ModelRoute{route}}, executor, modelA, modelB)
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "auto", []byte(`{"model":"auto","stream":true}`), "")
+	var firstBody []byte
+	for chunk := range dataChan {
+		firstBody = append(firstBody, chunk...)
+	}
+	if len(firstBody) == 0 {
+		t.Fatal("first stream returned no payload before the terminal error")
+	}
+	var firstErr *interfaces.ErrorMessage
+	for errMsg := range errChan {
+		firstErr = errMsg
+	}
+	if firstErr == nil || firstErr.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("first stream error = %+v, want status %d", firstErr, http.StatusTooManyRequests)
+	}
+	if selection := handler.configuredModelRouteRuntime().Select(route, time.Now()); selection.model != modelB {
+		t.Fatalf("selected model after late stream failure = %q, want %q", selection.model, modelB)
+	}
+
+	dataChan, _, errChan = handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "auto", []byte(`{"model":"auto","stream":true}`), "")
+	for range dataChan {
+	}
+	for errMsg := range errChan {
+		if errMsg != nil {
+			t.Fatalf("second stream error = %+v", errMsg)
+		}
+	}
+	gotModels := executor.executedModels()
+	wantModels := []string{modelA, modelB}
 	if fmt.Sprint(gotModels) != fmt.Sprint(wantModels) {
 		t.Fatalf("executed models = %v, want %v", gotModels, wantModels)
 	}
