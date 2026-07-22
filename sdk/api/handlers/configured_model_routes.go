@@ -284,7 +284,11 @@ func (h *BaseAPIHandler) streamConfiguredModelRoute(ctx context.Context, entryPr
 		dataChan, headers, errChan := h.executeStreamWithAuthManagerFormats(ctx, entryProtocol, exitProtocol, targetModel, rawJSON, alt, false, configuredModelRouteChildOptions(parentOptions, requestedModel))
 		firstChunk, gotFirstChunk, errMsg := receiveConfiguredModelRouteFirstChunk(ctx, dataChan, errChan)
 		if errMsg == nil {
-			outData, outErr := rewriteConfiguredModelRouteStream(ctx, firstChunk, gotFirstChunk, dataChan, errChan, requestedModel)
+			outData, outErr := rewriteConfiguredModelRouteStream(ctx, firstChunk, gotFirstChunk, dataChan, errChan, requestedModel, func(lateErr *interfaces.ErrorMessage) {
+				if shouldConfiguredModelRouteFailover(ctx, lateErr) {
+					runtime.MarkFailure(route, selection.model, lateErr, time.Now())
+				}
+			})
 			return outData, headers, outErr
 		}
 		if !shouldConfiguredModelRouteFailover(ctx, errMsg) {
@@ -354,7 +358,7 @@ func receiveConfiguredModelRouteFirstChunk(ctx context.Context, dataChan <-chan 
 	return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errors.New("upstream stream closed before emitting data")}
 }
 
-func rewriteConfiguredModelRouteStream(ctx context.Context, firstChunk []byte, gotFirstChunk bool, dataChan <-chan []byte, errChan <-chan *interfaces.ErrorMessage, requestedModel string) (<-chan []byte, <-chan *interfaces.ErrorMessage) {
+func rewriteConfiguredModelRouteStream(ctx context.Context, firstChunk []byte, gotFirstChunk bool, dataChan <-chan []byte, errChan <-chan *interfaces.ErrorMessage, requestedModel string, onTerminalError func(*interfaces.ErrorMessage)) (<-chan []byte, <-chan *interfaces.ErrorMessage) {
 	outData := make(chan []byte)
 	outErr := make(chan *interfaces.ErrorMessage, 1)
 	go func() {
@@ -394,6 +398,9 @@ func rewriteConfiguredModelRouteStream(ctx context.Context, firstChunk []byte, g
 					continue
 				}
 				if errMsg != nil {
+					if onTerminalError != nil {
+						onTerminalError(errMsg)
+					}
 					select {
 					case outErr <- errMsg:
 					case <-ctx.Done():
